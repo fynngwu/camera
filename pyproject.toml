@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "camera-cal"
+version = "0.1.0"
+description = "OpenCV USB camera calibration toolkit with AprilTag BEV support"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy<2",
+    "pupil-apriltags>=1.0.4.post11",
+    "pyyaml",
+]
+
+[project.scripts]
+camera-cal = "camera_cal.cli:main"
+capture = "camera_cal.capture:main"
+calibrate = "camera_cal.calibrate:main"
+undistort = "camera_cal.undistort:main"
+bev = "apriltag_to_bev:main"
+icalib = "camera_cal.interactive_calibrate:main"
+
+[tool.uv]
+package = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/camera_cal", "apriltag_to_bev.py", "generate_apriltag.py"]

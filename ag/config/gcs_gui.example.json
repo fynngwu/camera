@@ -1,0 +1,33 @@
+{
+  "rpi_host": "10.192.1.3",
+  "rpi_port": 46001,
+  "heartbeat_interval_sec": 1.0,
+  "reconnect_interval_sec": 1.0,
+  "rtsp_url": "rtsp://10.192.1.3:8554/video",
+  "rtsp_pipeline": "",
+  "video_fps_limit": 20.0,
+  "bev_process_every_n": 2,
+  "command_timeout_ms": 400,
+  "planning": {
+    "resolution_m": 0.05,
+    "robot_radius_m": 0.10
+  },
+  "map": {
+    "x_min": -1.0,
+    "x_max": 1.0,
+    "y_min": -1.0,
+    "y_max": 1.0,
+    "ppm": 300
+  },
+  "bev": {
+    "enabled": true,
+    "calibration_path": "config/camera_assets/camera_calibration.npz",
+    "target_id": 0,
+    "tag_size": 0.09,
+    "x_min": -1.0,
+    "x_max": 1.0,
+    "y_min": -1.0,
+    "y_max": 1.0,
+    "ppm": 300
+  }
+}

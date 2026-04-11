@@ -1,0 +1,14 @@
+[project]
+name = "ag"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12.3"
+dependencies = [
+    "pupil-apriltags>=1.0.4.post11",
+]
+
+[project.optional-dependencies]
+gui = [
+    "pyside6>=6.11.0",
+]

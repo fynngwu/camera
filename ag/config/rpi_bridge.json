@@ -1,0 +1,22 @@
+{
+  "bind_host": "0.0.0.0",
+  "bind_port": 46001,
+  "robot_host": "10.192.1.2",
+  "robot_port": 47001,
+  "control_hz": 10.0,
+  "bridge_status_hz": 2.0,
+  "robot_reconnect_sec": 1.0,
+  "vx_limit": 0.30,
+  "vy_limit": 0.20,
+  "wz_limit": 0.50,
+  "manual_cmd_timeout_sec": 0.50,
+  "track_pose_timeout_sec": 0.50,
+  "default_mode": "IDLE",
+  "path_tracker": {
+    "lookahead_distance": 0.50,
+    "k_yaw": 1.50,
+    "goal_tolerance": 0.20,
+    "target_speed": 0.20,
+    "slowdown_radius": 0.60
+  }
+}

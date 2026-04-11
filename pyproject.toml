@@ -12,6 +12,7 @@ dependencies = [
     "numpy<2",
     "pupil-apriltags>=1.0.4.post11",
     "pyyaml",
+    "pyside6>=6.6",
 ]
 
 [project.scripts]
@@ -24,6 +25,11 @@ icalib = "camera_cal.interactive_calibrate:main"
 
 [tool.uv]
 package = true
+
+[tool.uv.workspace]
+members = [
+    "ag",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/camera_cal", "apriltag_to_bev.py", "generate_apriltag.py"]

@@ -51,10 +51,21 @@ def main():
         default="calibration.yaml",
         help="Output YAML file path",
     )
+    parser.add_argument(
+        "--save-images",
+        type=str,
+        default=None,
+        help="Directory to save captured images (default: images)",
+    )
     args = parser.parse_args()
 
     # Initialize configuration
     config = CalibrationConfig()
+
+    # Create image save directory
+    image_save_dir = Path(args.save_images) if args.save_images else Path("images")
+    image_save_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Images will be saved to: {image_save_dir}")
 
     # Initialize state
     state = CalibrationState.CAPTURE
@@ -153,6 +164,7 @@ def main():
                 calibrator,
                 config,
                 last_capture_time,
+                image_save_dir,
             )
             if new_state is not None:
                 state = new_state
@@ -314,6 +326,7 @@ def _handle_capture_keys(
     calibrator: CameraCalibrator,
     config: CalibrationConfig,
     last_capture_time: float,
+    image_save_dir: Path,
 ) -> tuple:
     """Handle keyboard input in capture state.
 
@@ -323,6 +336,7 @@ def _handle_capture_keys(
         calibrator: Calibrator instance
         config: Configuration
         last_capture_time: Last capture timestamp
+        image_save_dir: Directory to save captured images
 
     Returns:
         Tuple of (new_state, calibration_result, undistort_maps, updated_last_capture_time)
@@ -344,9 +358,14 @@ def _handle_capture_keys(
             )
 
             if detected:
+                sample_count = calibrator.get_sample_count() + 1
                 calibrator.add_sample(corners, frame)
                 updated_last_capture_time = current_time  # Update last capture time on success
-                print(f"[{calibrator.get_sample_count():3d}] Captured frame")
+
+                # Save image to directory
+                image_path = image_save_dir / f"capture_{sample_count:03d}.png"
+                cv2.imwrite(str(image_path), frame)
+                print(f"[{sample_count:3d}] Captured frame -> {image_path}")
 
                 # Flash effect
                 frame_bright = cv2.convertScaleAbs(frame, alpha=1.5, beta=50)
@@ -356,7 +375,12 @@ def _handle_capture_keys(
                 print("Capture failed: No chessboard detected")
 
     elif key == ord("d") or key == ord("D"):  # Delete last
+        sample_count = calibrator.get_sample_count()
         if calibrator.remove_last_sample():
+            # Delete corresponding image file
+            image_path = image_save_dir / f"capture_{sample_count:03d}.png"
+            if image_path.exists():
+                image_path.unlink()
             print(f"Deleted last capture. Remaining: {calibrator.get_sample_count()}")
 
     elif key == 13:  # ENTER - Start calibration

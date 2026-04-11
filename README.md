@@ -7,6 +7,7 @@
 - **RTSP 视频流**：基于 GStreamer 的远程摄像头图像实时传输
 - **相机标定**：完整的相机标定工具链，支持棋盘格图案标定和畸变校正
 - **AprilTag BEV**：实时的 AprilTag 检测和 BEV（鸟瞰图）投影
+- **Qt 前端查看器**：高性能 PySide6 相机查看器，支持 RTSP 和 USB
 
 ## 项目结构
 
@@ -19,6 +20,10 @@ camera/
 │   ├── rtsp_manager.sh        # RTSP 管理工具
 │   ├── simple_rtsp_viewer.py  # 简洁版 RTSP 查看器
 │   └── view_rtsp_stream.py    # 完整版 RTSP 查看器（带性能测试）
+├── frontend/                   # Qt 前端应用
+│   ├── main.py                # 主入口
+│   ├── view/                  # UI组件
+│   └── server/                # 后端线程
 ├── src/                        # 源代码
 │   └── camera_cal/            # 相机标定模块
 ├── calibration_data/           # 标定数据
@@ -34,7 +39,11 @@ camera/
 - `uv`
 - 系统自带 OpenCV，且必须支持 GStreamer
 
-**重要**：本项目不通过 `pip` 安装 `opencv-python`。因为 pip 版本的 OpenCV 通常没有 GStreamer 支持，会导致 RTSP 管线失效。
+```bash
+sudo apt install -y v4l-utils gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav python3-opencv gir1.2-gst-rtsp-server-1.0
+```
+
+**重要**：本项目不通过 `pip` 安装 `opencv-python`。pip 版本的 OpenCV 通常没有 GStreamer 支持。
 
 验证系统 OpenCV：
 
@@ -51,11 +60,15 @@ PY
 
 ```bash
 cd /home/wufy/learning/camera
-uv venv --python 3.10 --system-site-packages
+
+# 创建虚拟环境，自动使用系统Python版本并继承系统包（关键：获得GStreamer支持的OpenCV）
+uv venv --python $(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')") --system-site-packages
 uv sync
 ```
 
-**关键参数**：`--system-site-packages` 让 `.venv` 复用系统已安装的 OpenCV，保留 GStreamer 支持。
+**关键参数**：
+- `--python $(...)`：动态读取系统Python版本，确保一致
+- `--system-site-packages`：让 `.venv` 复用系统已安装的 OpenCV，保留 GStreamer 支持
 
 ---
 
@@ -66,12 +79,17 @@ uv sync
 ### 快速启动
 
 ```bash
-# 启动 RTSP 服务器（默认 1080p30）
-./scripts/rtsp_manager.sh start
+# 启动 RTSP 服务器 - 最高分辨率 1080p30（推荐）
+/usr/bin/python3 scripts/rtsp_server.py
 
-# 启动查看器
-./scripts/rtsp_manager.sh view
+# 或手动指定最高分辨率
+/usr/bin/python3 scripts/rtsp_server.py --width 1920 --height 1080 --fps 30
+
+# 启动查看器（在另一台机器上）
+/usr/bin/python3 scripts/simple_rtsp_viewer.py --url rtsp://127.0.0.1:8554/video
 ```
+
+> **注意**：必须使用 `/usr/bin/python3`（系统 Python），因为需要 `gi` 模块（GStreamer RTSP Server）。项目 `.venv` 中没有此模块。
 
 ### 配置分辨率和帧率
 
@@ -146,12 +164,20 @@ REMOTE_USER="你的用户名"
 
 | 参数 | 值 |
 |------|------|
-| RTSP URL | `rtsp://100.103.8.66:8554/video` |
+| RTSP URL | `rtsp://<服务器IP>:8554/video` |
 | 视频编码 | H.264 (摄像头原生输出) |
-| 默认分辨率 | 1920x1080 |
+| 最高分辨率 | 1920x1080 @ 30fps |
 | 传输协议 | RTSP over TCP |
 | 延迟 | < 200ms |
-| 平均 FPS | 30fps |
+
+**摄像头支持的分辨率 (H.264)**：
+
+| 分辨率 | 帧率 |
+|--------|------|
+| 1920x1080 | 30fps |
+| 1280x720 | 30fps |
+| 640x480 | 30fps |
+| 320x240 | 30fps |
 
 ---
 
@@ -173,10 +199,10 @@ REMOTE_USER="你的用户名"
 uv run icalib
 
 # 使用 USB 相机
-uv run icalib --usb
+uv run icalib --url rtsp://127.0.0.1:8554/video
 
-# 指定相机设备 ID
-uv run icalib --usb --camera 1
+# 测试去畸变效果
+uv run undistort --calibration calibration.yaml --url rtsp://127.0.0.1:8554/video
 
 # 指定输出文件
 uv run icalib --output my_calibration.yaml
@@ -333,6 +359,59 @@ uv run python generate_apriltag.py
 - `--quad-decimate` 降到 `1.2` 或 `1.0`
 - 保证 AprilTag 外侧有足够白边 quiet zone
 - 提高照明稳定性，避免反光和运动模糊
+
+---
+
+## 4. Qt 前端相机查看器
+
+基于 PySide6 的高性能相机查看器，支持 RTSP 流和 USB 相机。
+
+### 目录结构
+
+```
+frontend/
+├── main.py                  # 主入口
+├── view/                    # UI组件
+│   ├── main_window.py      # 主窗口
+│   └── camera_widget.py    # 相机显示控件
+└── server/                  # 后端线程
+    ├── frame_buffer.py     # 线程安全帧缓冲
+    └── camera_worker.py    # 相机读取QThread
+```
+
+### 快速启动
+
+```bash
+# 默认连接 RTSP 流
+source .venv/bin/activate && python -m frontend.main
+
+# 连接本地 RTSP 服务器
+source .venv/bin/activate && python -m frontend.main --rtsp rtsp://127.0.0.1:8554/video
+
+# 使用 USB 相机
+source .venv/bin/activate && python -m frontend.main --usb 0
+
+# 全屏模式
+source .venv/bin/activate && python -m frontend.main --fullscreen
+```
+
+### 功能特性
+
+- 低延迟 GStreamer RTSP 流（`latency=0`, `drop=true`）
+- 后台线程帧捕获，不阻塞 GUI
+- 实时 FPS 显示
+- 连接/断开控制
+- 刷新率可调节
+
+### 命令行参数
+
+| 参数 | 说明 |
+|------|------|
+| `--rtsp <url>` | RTSP 流地址 |
+| `--usb <id>` | USB 相机设备 ID |
+| `--fullscreen` | 全屏模式 |
+| `--width <n>` | 窗口宽度（默认 1600） |
+| `--height <n>` | 窗口高度（默认 900） |
 
 ---
 

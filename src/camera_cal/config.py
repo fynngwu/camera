@@ -14,7 +14,7 @@ class CalibrationConfig:
 
     # Chessboard pattern configuration
     pattern_size: tuple[int, int] = (9, 6)  # Inner corners (width x height)
-    square_size: float = 30.0  # Square size in millimeters
+    square_size: float = 19.0  # Square size in millimeters
     min_samples: int = 12  # Minimum number of images for calibration
 
     # Calibration parameters

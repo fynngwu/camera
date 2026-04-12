@@ -2,6 +2,19 @@
 
 相机工具集，包含 RTSP 远程视频流传输、相机标定和 AprilTag BEV 投影功能。
 
+## 相机启动
+
+1. 将相机通过 USB 连接到树莓派，按下相机上的按钮切换到 **PC 模式**
+2. SSH 登录树莓派并启动 RTSP 服务器：
+   ```bash
+   ssh wufy@10.28.215.179
+   python3 rtsp_server.py
+   ```
+3. 在本机查看相机画面：
+   ```bash
+   python3 scripts/simple_rtsp_viewer.py --url rtsp://10.28.215.179:8554/video
+   ```
+
 ## 功能特性
 
 - **RTSP 视频流**：基于 GStreamer 的远程摄像头图像实时传输

@@ -39,15 +39,22 @@ def view_rtsp(url: str, window_name: str = 'RTSP Stream') -> None:
     按键操作:
         q / Q: 退出
     """
-    # 创建 pipeline 并打开摄像头
+    # 优先使用 GStreamer 后端（低延迟），不可用时回退到 FFmpeg 后端
     pipeline = create_pipeline(url)
     cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+    backend = "GStreamer"
+
+    if not cap.isOpened():
+        # 回退到 FFmpeg 后端（opencv-python 默认自带）
+        cap = cv2.VideoCapture(url)
+        backend = "FFmpeg"
 
     if not cap.isOpened():
         print(f"错误：无法打开 RTSP 流：{url}")
+        print("请检查：1) RTSP 服务器是否运行  2) 网络是否可达  3) URL 是否正确")
         return
 
-    print(f"已连接：{url}")
+    print(f"已连接：{url} (后端: {backend})")
     print("按 'q' 退出")
 
     while True:

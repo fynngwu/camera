@@ -6,7 +6,12 @@ from pathlib import Path
 from typing import List, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC_DIRS = [ROOT / "backend", ROOT / "gcs_gui"]
+SRC_DIRS = [
+    ROOT / "common",
+    ROOT / "ground_robot",
+    ROOT / "sky_uav",
+    ROOT / "ground_station",
+]
 OUT_PATH = ROOT / "wiki" / "function_index.md"
 
 
@@ -42,6 +47,7 @@ def parse_file(path: Path) -> Tuple[str, List[Tuple[str, str, str]]]:
 
 def main() -> None:
     """Generate wiki/function_index.md."""
+    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     lines = ["# Function Index", "", "本文件由 `tools/generate_wiki.py` 自动生成。", ""]
     for path in iter_python_files():
         rel = path.relative_to(ROOT).as_posix()

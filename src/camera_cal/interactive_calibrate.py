@@ -362,9 +362,11 @@ def _handle_capture_keys(
                 calibrator.add_sample(corners, frame)
                 updated_last_capture_time = current_time  # Update last capture time on success
 
-                # Save image to directory
+                # Save image with chessboard corners drawn
+                save_frame = frame.copy()
+                cv2.drawChessboardCorners(save_frame, config.pattern_size, corners, True)
                 image_path = image_save_dir / f"capture_{sample_count:03d}.png"
-                cv2.imwrite(str(image_path), frame)
+                cv2.imwrite(str(image_path), save_frame)
                 print(f"[{sample_count:3d}] Captured frame -> {image_path}")
 
                 # Flash effect

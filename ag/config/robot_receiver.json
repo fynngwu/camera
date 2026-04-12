@@ -1,7 +1,0 @@
-{
-  "bind_host": "0.0.0.0",
-  "bind_port": 47001,
-  "status_hz": 2.0,
-  "default_command_timeout_ms": 400,
-  "adapter_type": "dummy"
-}

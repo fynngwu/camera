@@ -2,11 +2,16 @@
 
 ## 项目概述
 
-AG 是一个农业引导系统，包含地面站 GUI 和后端通信服务，用于控制地面机器人进行路径跟踪作业。
+AG 是一个农业引导与调试系统，包含地面站 GUI 和后端通信服务，用于实现：
+
+- GCS 端路径规划
+- RPi 端路径跟踪（Pure Pursuit）
+- Robot 端速度执行
+- GCS 可视化 odom / cmd_vel / robot 状态
 
 ## 目录结构
 
-```
+```text
 ag/
 ├── pyproject.toml                 # Python 项目配置（uv 包管理）
 ├── .python-version                # Python 版本要求 (3.12.3+)
@@ -68,36 +73,12 @@ ag/
     └── demo_path.json             # 示例路径
 ```
 
-## 三层架构
+## 核心架构
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    GUI 地面站层                           │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐  │
-│  │ gcs_client  │  │ rtsp_worker │  │ bev_processor   │  │
-│  │ (TCP 客户端) │  │ (RTSP 接收)  │  │ (AprilTag BEV)  │  │
-│  └─────────────┘  └─────────────┘  └─────────────────  │
-│  ┌─────────────────────────────────────────────────────┐│
-│  │                    widgets                          ││
-│  │  main_window | map_canvas | control_panel | ...    ││
-│  └─────────────────────────────────────────────────────┘│
-└─────────────────────────────────────────────────────────┘
-                          │ TCP
-┌─────────────────────────────────────────────────────────┐
-│                  Backend 通信层                          │
-│  ┌─────────────────────────┐  ┌────────────────────────┐│
-│  │    rpi_bridge           │  │   robot_receiver       ││
-│  │  - GCS 服务器            │  │   - RPi 客户端          ││
-│  │  - Robot 客户端          │  │   - 命令执行            ││
-│  │  - 协议转发              │  │   - 状态反馈            ││
-│  │  - 路径跟踪              │  │   - 超时保护            ││
-│  └─────────────────────────┘  └────────────────────────┘│
-│  ┌─────────────────────────────────────────────────────┐│
-│  │ shared/protocol.py - 协议定义                        ││
-│  │  - 消息类型：mode, cmd_vel, pose2d, path, ack...   ││
-│  │  - 验证函数：validate_mode, validate_cmd_vel...    ││
-│  └─────────────────────────────────────────────────────┘│
-└─────────────────────────────────────────────────────────┘
+```text
+GCS (规划) ──path──→ RPi Bridge (odom模拟 + pure pursuit) ──cmd_vel──→ Robot (执行)
+                          │
+                          └──bridge_status(odom+cmd_vel+robot_odom)──→ GCS (可视化)
 ```
 
 ## 三个独立服务
@@ -110,27 +91,31 @@ ag/
 
 ## 数据流
 
-### GUI → RPi → Robot（下行命令）
-```
-GUI 发送 → GcsTcpClient.send_*() → TCP → RPiBridge._process_gcs_message()
-    → 状态存储 → _control_loop() → _control_step()
-    → _send_cmd_to_robot() → TCP → RobotReceiver._process_message()
-    → adapter.set_velocity()
+### GCS → RPi → Robot（下行控制）
+
+```text
+GCS 发送 path -> RPiBridge._process_gcs_message()
+    -> RPi 控制循环 _control_step()
+    -> _integrate_odom() + PathTracker.compute_command()
+    -> _send_cmd_to_robot()
+    -> RobotReceiver._process_message()
+    -> adapter.set_velocity()
 ```
 
-### Robot → RPi → GUI（上行反馈）
-```
-Robot → status 消息 → TCP → RPiBridge._robot_reader_loop()
-    → _forward_robot_message() → TCP → GUI
-    → MainWindow.on_robot_message_received()
+### Robot → RPi → GCS（上行反馈）
+
+```text
+Robot status/event/ack -> RPiBridge._robot_reader_loop()
+    -> bridge_status / robot_message 转发到 GUI
+    -> MainWindow.on_bridge_status_received()
 ```
 
-### 视频流链路
-```
-相机 → RTSP → RtspWorker._run() → cap.read()
-    → rawFrameReady 信号 → MainWindow.on_raw_frame() → ImageView
-    → BevProcessor.process() → bevFrameReady 信号
-    → MainWindow.on_bev_frame() → MapCanvas.set_background()
+### 视频链路
+
+```text
+相机 -> RTSP -> RtspWorker
+    -> rawFrameReady -> ImageView
+    -> (可选) BevProcessor.process -> bevFrameReady -> MapCanvas
 ```
 
 ## 通信协议
@@ -139,23 +124,18 @@ Robot → status 消息 → TCP → RPiBridge._robot_reader_loop()
 
 | 方向 | 类型 | 说明 |
 |------|------|------|
-| GCS→RPi | `mode` | 设置模式 (IDLE/MANUAL_PASS/TRACK_PATH/E_STOP) |
-| GCS→RPi | `cmd_vel` | 速度命令 (vx, vy, wz) |
-| GCS→RPi | `pose2d` | 位姿更新 (x, y, yaw) |
-| GCS→RPi | `path` | 路径点列表 |
-| GCS→RPi | `request_status` | 请求状态 |
-| GCS→RPi | `heartbeat` | 心跳 |
+| GCS→RPi | `path` | 路径点列表 + target_speed |
+| GCS→RPi | `request_status` | 请求桥接状态 |
+| RPi→Robot | `cmd_vel` | 控制速度 (vx, vy, wz) |
+| Robot→RPi | `ack` | 命令确认 |
+| Robot→RPi | `status` | 执行状态 |
+| Robot→RPi | `event` | 事件日志 |
 | RPi→GCS | `ack` | 命令确认 |
-| RPi→GCS | `bridge_status` | 桥接状态 |
+| RPi→GCS | `bridge_status` | 桥接状态（含 odom/cmd/robot） |
 | RPi→GCS | `robot_message` | 机器人消息透传 |
 | RPi→GCS | `event` | 事件日志 |
 
-## 控制模式
-
-- **IDLE** - 空闲，发送零速度命令
-- **MANUAL_PASS** - 手动透传模式，转发 GUI 发送的速度命令
-- **TRACK_PATH** - 路径跟踪模式，使用 PathTracker 计算速度
-- **E_STOP** - 紧急停止，立即发送零命令
+说明：系统不再使用控制模式与应用层 heartbeat。
 
 ## 关键类
 
@@ -163,10 +143,11 @@ Robot → status 消息 → TCP → RPiBridge._robot_reader_loop()
 
 | 类 | 文件 | 职责 |
 |----|------|------|
-| `MainWindow` | `widgets/main_window.py` | 主窗口，整合所有服务与控件 |
-| `MapCanvas` | `widgets/map_canvas.py` | BEV 地图画布，支持 waypoint/obstacle 绘制 |
-| `ControlPanel` | `widgets/control_panel.py` | 左侧控制面板 |
-| `QtGcsClientBridge` | `services/gcs_client.py` | Qt 信号/槽封装的 TCP 客户端 |
+| `MainWindow` | `widgets/main_window.py` | 主窗口，整合服务与控件 |
+| `MapCanvas` | `widgets/map_canvas.py` | BEV 画布，支持 waypoint/obstacle 绘制 |
+| `ControlPanel` | `widgets/control_panel.py` | 左侧连接与规划控制 |
+| `StatusPanel` | `widgets/status_panel.py` | 状态摘要与 JSON 查看 |
+| `QtGcsClientBridge` | `services/gcs_client.py` | Qt 信号/槽封装 TCP 客户端 |
 | `RtspWorker` | `services/rtsp_worker.py` | RTSP 后台读取线程 |
 | `BevProcessor` | `services/bev_processor.py` | AprilTag 检测与 BEV 投影 |
 | `AStarPlanner` | `services/planner.py` | A* 路径规划器 |
@@ -175,47 +156,46 @@ Robot → status 消息 → TCP → RPiBridge._robot_reader_loop()
 
 | 类 | 文件 | 职责 |
 |----|------|------|
-| `RPiBridge` | `rpi_bridge/bridge_core.py` | RPi 桥接核心，处理 GCS/Robot 消息转发 |
-| `RobotReceiver` | `robot_receiver/robot_receiver.py` | 机器人端 TCP 服务器 |
+| `RPiBridge` | `rpi_bridge/bridge_core.py` | 桥接核心：path接收、pure pursuit、状态汇总 |
+| `RobotReceiver` | `robot_receiver/robot_receiver.py` | 机器人端 TCP 接收与执行 |
 | `PathTracker` | `rpi_bridge/path_tracker.py` | 几何路径跟踪器（Pure Pursuit 变体） |
 | `BaseRobotAdapter` | `robot_adapter.py` | 机器人适配器抽象接口 |
 | `DummyRobotAdapter` | `robot_adapter.py` | 虚拟适配器（测试用） |
 
-### 协议层
-
-| 函数 | 文件 | 职责 |
-|------|------|------|
-| `make_message()` | `protocol.py` | 构建协议消息 |
-| `encode_message()` | `protocol.py` | JSON 序列化 |
-| `validate_*()` | `protocol.py` | 消息验证 |
-| `read_message()` | `network.py` | 异步读取消息 |
-| `send_message()` | `network.py` | 异步发送消息 |
-
 ## 配置文件
 
 ### `config/gcs_gui.json`
-- `rpi_host` / `rpi_port` - RPi 连接地址
-- `rtsp_url` - RTSP 视频流地址
-- `bev` - AprilTag BEV 配置（标定文件、Tag ID/尺寸、坐标范围）
-- `planning` - A* 规划器配置（分辨率、机器人半径）
+
+- `rpi_host` / `rpi_port`
+- `reconnect_interval_sec`
+- `rtsp_url` / `rtsp_pipeline`
+- `video_fps_limit` / `bev_process_every_n`
+- `bev`（标定/Tag/范围）
+- `planning`（分辨率、机器人半径）
 
 ### `config/rpi_bridge.json`
-- `bind_host` / `bind_port` - GCS 服务器监听地址
-- `robot_host` / `robot_port` - Robot 连接地址
-- `control_hz` - 控制循环频率
-- `vx_limit` / `vy_limit` / `wz_limit` - 速度限制
-- `path_tracker` - 路径跟踪参数（前视距离、yaw增益、目标容忍）
+
+- `bind_host` / `bind_port`
+- `robot_host` / `robot_port`
+- `control_hz` / `bridge_status_hz`
+- `robot_reconnect_sec`
+- `vx_limit` / `vy_limit` / `wz_limit`
+- `command_timeout_ms`
+- `odom_max_dt_sec`
+- `initial_odom`
+- `path_tracker`
 
 ### `config/robot_receiver.json`
-- `bind_host` / `bind_port` - 监听地址
-- `status_hz` - 状态上报频率
-- `default_command_timeout_ms` - 命令超时
-- `adapter_type` - 适配器类型
+
+- `bind_host` / `bind_port`
+- `status_hz`
+- `default_command_timeout_ms`
+- `adapter_type`
 
 ## 设计特点
 
-1. **解耦设计** - GUI、通信、视频、规划完全独立，便于替换组件
-2. **异步架构** - Backend 使用 asyncio，GUI 使用线程
-3. **协议抽象** - 统一的 JSON Lines 协议，支持 ACK 机制
-4. **超时保护** - 命令超时自动停止，保证安全
-5. **状态可见** - GUI 实时显示连接状态、模式、执行反馈
+1. **职责收敛**：GCS 只负责规划与可视化，控制逻辑集中在 RPi。
+2. **链路简化**：移除 mode/heartbeat，减少状态机复杂度。
+3. **异步解耦**：Backend 使用 asyncio；GUI 使用线程+信号。
+4. **安全兜底**：Robot Receiver 命令超时自动 stop。
+5. **状态可见**：GUI 通过 `bridge_status` 集中观测 odom/cmd/robot 反馈。

@@ -33,5 +33,9 @@ calibration_data/
 # Claude Code
 .claude/
 
+# Other AI tools
+.codex/
+.qwen/
+
 # Memory files
 *.jsonl

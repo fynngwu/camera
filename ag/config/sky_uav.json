@@ -1,0 +1,33 @@
+{
+  "gcs_bind_host": "0.0.0.0",
+  "gcs_port": 46001,
+  "robot_bind_host": "0.0.0.0",
+  "robot_port": 47001,
+  "rtsp_port": 8554,
+  "telemetry_hz": 10.0,
+  "controller": {
+    "control_hz": 20.0,
+    "vx_limit": 0.35,
+    "vy_limit": 0.0,
+    "wz_limit": 0.8,
+    "lookahead_distance": 0.35,
+    "goal_tolerance": 0.15,
+    "slowdown_radius": 0.6,
+    "target_speed": 0.2,
+    "k_yaw": 1.8,
+    "k_speed": 0.9,
+    "resample_step": 0.08,
+    "spline_samples_per_segment": 16,
+    "initial_x": 0.0,
+    "initial_y": 0.0,
+    "initial_yaw": 0.0
+  },
+  "rtsp": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "device": "/dev/video0",
+    "bitrate": 4000,
+    "test": false
+  }
+}

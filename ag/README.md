@@ -1,217 +1,130 @@
-# Air-Ground Qt Suite
+# AG 三端最小可运行版
 
-这是把你现有的 **空地通信最小链路** 和 **camera RTSP / AprilTag BEV** 整合到一起的一套工程。
+本目录已重构为三个独立端：
+- `ground_robot`：只接收天空端 `cmd_vel(vx, vy, wz)` 并打印
+- `sky_uav`：RTSP 服务 + TCP 枢纽 + 位姿/路径跟踪控制
+- `ground_station`：Qt 前端 + 图像 BEV 后端 + 规划/协议后端
 
-目标是让地面站不再依赖命令行，而是直接通过 **Qt 图形化界面** 完成：
+目标链路：
+1. 地面站规划路径并发送给天空端
+2. 天空端平滑路径、虚拟 odom 追踪、持续下发 `cmd_vel` 到地面机器人
+3. 天空端持续回传 `telemetry` 给地面站
+4. 地面站显示 RTSP/BEV 画面与 `cmd` 数值/箭头
 
-- 连接 RPi bridge，并查看连接状态 / ACK / 事件 / robot 状态。
-- 接收 RTSP 视频流。
-- 在 GUI 中显示 AprilTag 投影后的 BEV 图。
-- 在 BEV 图上鼠标交互：画 waypoint、画 obstacle、擦除。
-- 本地进行简单路径规划（A* 网格规划）。
-- 将路径、位姿、速度命令发送给 RPi。
-- 在界面上显示当前模式、最后发送命令、cmd 箭头、robot 返回信息。
-
----
-
-## 工程结构
+## 目录结构
 
 ```text
-air_ground_qt_suite/
-├── README.md
-├── requirements-gui.txt
-├── requirements-backend.txt
+ag/
+├── common/
+│   └── protocol.py                 # JSONL 协议编解码与校验
+├── ground_robot/
+│   └── receiver.py                 # TCP 客户端，接收并打印 cmd_vel
+├── sky_uav/
+│   ├── rtsp_server.py              # 独立 RTSP 服务
+│   ├── tcp_connector.py            # TCP 枢纽：连接 GCS 与 robot
+│   └── pose_controller.py          # 虚拟位姿 + 三次样条平滑 + 逐点跟踪
+├── ground_station/
+│   ├── frontend.py                 # Qt 前端（RTSP/BEV + 路径交互 + cmd 可视化）
+│   ├── bev_backend.py              # RTSP 接收 + AprilTag BEV
+│   └── planning_backend.py         # A* 规划 + TCP 协议收发
 ├── config/
-│   ├── gcs_gui.example.json
-│   ├── rpi_bridge.json
-│   ├── robot_receiver.json
-│   └── camera_assets/
-│       └── README.md
+│   ├── ground_robot.json
+│   ├── sky_uav.json
+│   └── ground_station.json
 ├── scripts/
-│   ├── run_gcs_gui.sh
-│   ├── run_rpi_bridge.sh
-│   └── run_robot_receiver.sh
-├── backend/
-│   ├── shared/
-│   ├── rpi_bridge/
-│   └── robot_receiver/
-├── gcs_gui/
-│   ├── main.py
-│   ├── app_config.py
-│   ├── app_state.py
-│   ├── qt_compat.py
-│   ├── image_utils.py
-│   ├── services/
-│   └── widgets/
-├── tests/
-├── tools/
-└── wiki/
+│   ├── run_ground_robot.sh
+│   ├── run_sky_tcp.sh
+│   ├── run_sky_rtsp.sh
+│   └── run_ground_station.sh
+└── tests/
+    ├── test_protocol.py
+    ├── test_pose_controller.py
+    └── test_loopback_integration.py
 ```
 
----
+## 协议（JSON Lines）
 
-## 启动顺序
+全部消息为 `\n` 分隔 JSON 对象。
 
-### 1）机器人端（NUC）
+### 1. Ground Station -> Sky UAV
+- `path`
+- 字段：
+  - `type`: `"path"`
+  - `seq`: 整数序号
+  - `points`: `[[x, y], ...]`
+  - `target_speed`: 目标线速度
+
+### 2. Sky UAV -> Ground Robot
+- `cmd_vel`
+- 字段：
+  - `type`: `"cmd_vel"`
+  - `seq`: 整数序号
+  - `vx`, `vy`, `wz`: 速度指令（当前 `vy` 默认 0）
+
+### 3. Sky UAV -> Ground Station
+- `telemetry`
+- 字段：
+  - `type`: `"telemetry"`
+  - `seq`: 整数序号
+  - `pose`: `{x, y, yaw}`
+  - `cmd`: `{vx, vy, wz}`
+  - `target_index`: 当前跟踪点索引
+  - `goal_reached`: 是否到达终点
+
+### 4. 可选观测消息
+- `ack` / `event`
+- 作为最小可观测性与调试反馈
+
+## 默认端口
+
+- `sky_uav.gcs_port = 46001`
+- `sky_uav.robot_port = 47001`
+- `sky_uav.rtsp_port = 8554`
+
+## 路径执行策略（天空端）
+
+- 地面站发送 A* 折线后，天空端先进行三次样条（Catmull-Rom）平滑
+- 再按固定弧长步长重采样
+- 控制线程周期更新虚拟位姿（odom 积分）
+- 逐点跟踪输出 `vx/vy/wz`
+- 到达终点阈值后输出零速并在 `telemetry.goal_reached=true`
+
+## 启动方式
+
+在 `ag/` 目录执行：
 
 ```bash
-cd air_ground_qt_suite
-bash scripts/run_robot_receiver.sh
+./scripts/run_ground_robot.sh
+./scripts/run_sky_tcp.sh
+./scripts/run_sky_rtsp.sh
+./scripts/run_ground_station.sh
 ```
 
-### 2）RPi 桥接端
+建议启动顺序：
+1. `run_ground_robot.sh`
+2. `run_sky_tcp.sh`
+3. `run_sky_rtsp.sh`
+4. `run_ground_station.sh`
+
+## 测试
 
 ```bash
-cd air_ground_qt_suite
-bash scripts/run_rpi_bridge.sh
+cd ag
+python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-### 3）地面站 Qt GUI
+测试覆盖：
+- 协议字段校验（`path/cmd_vel/telemetry`）
+- 三次样条平滑与重采样基本性质
+- 虚拟 odom 与控制输出（直线/转向/到点停车）
+- 本机回环集成（地面站 -> 天空端 -> 机器人）
 
-```bash
-cd air_ground_qt_suite
-bash scripts/run_gcs_gui.sh
-```
+## Wiki 生成
 
----
+`tools/generate_wiki.py` 已切换为扫描：
+- `common/`
+- `ground_robot/`
+- `sky_uav/`
+- `ground_station/`
 
-## GUI 依赖
-
-推荐 Python 3.10+。
-
-### GUI 依赖
-
-```bash
-python3 -m pip install -r requirements-gui.txt
-```
-
-> 注意：如果你要直接用 `cv2 + GStreamer` 打开 RTSP，最好优先使用系统自带 OpenCV，避免 pip 版 OpenCV 缺少 GStreamer 支持。
-
-### backend 依赖
-
-后端主要使用标准库；仅保留一个可选依赖：
-
-```bash
-python3 -m pip install -r requirements-backend.txt
-```
-
----
-
-## 配置
-
-### GUI 配置
-
-复制：
-
-```bash
-cp config/gcs_gui.example.json config/gcs_gui.json
-```
-
-然后改：
-
-- `rpi_host` / `rpi_port`
-- `rtsp_url`
-- `bev.calibration_path`
-
-### camera 标定文件
-
-把你的标定 `npz` 放到：
-
-```text
-config/camera_assets/camera_calibration.npz
-```
-
-或者在 `config/gcs_gui.json` 中指向你自己的绝对路径。
-
----
-
-## GUI 主要操作
-
-### 连接控制
-
-- `Connect RPi`：连接桥接端。
-- `Start RTSP`：启动 RTSP 接收。
-- `Request Status`：主动拉一次 bridge_status。
-
-### 模式控制
-
-- `IDLE`
-- `MANUAL_PASS`
-- `TRACK_PATH`
-- `E_STOP`
-
-### 手动发命令
-
-在速度框里输入 `vx / vy / wz`，点击 `Send Cmd`。
-
-### 位姿
-
-输入 `x / y / yaw`，点击 `Send Pose`。
-
-### 地图交互
-
-- `Waypoint`：在 BEV 上左键添加路径点。
-- `Obstacle`：拖拽生成矩形障碍物。
-- `Erase`：点击删除附近的 waypoint / obstacle。
-- `Plan`：基于当前 pose + waypoint 做 A* 规划。
-- `Send Path`：把规划结果发给 RPi。
-- `Clear`：清空标注。
-
----
-
-## 与你现有项目的衔接点
-
-### RPi 端
-
-- 继续使用原本 TCP JSON Lines 协议。
-- 保持 `mode / cmd_vel / pose2d / path / request_status` 不变。
-- 新增 `event` 和 `robot_message` 转发，使 GUI 能看见更完整的反馈。
-
-### camera 端
-
-- RTSP 仍然走 OpenCV + GStreamer。
-- AprilTag BEV 保留原思路，但封装成 `BevProcessor`，供 GUI worker 调用。
-
----
-
-## 先看哪些文件
-
-推荐阅读顺序：
-
-1. `gcs_gui/widgets/main_window.py`
-2. `gcs_gui/services/gcs_client.py`
-3. `gcs_gui/widgets/map_canvas.py`
-4. `gcs_gui/services/planner.py`
-5. `gcs_gui/services/rtsp_worker.py`
-6. `gcs_gui/services/bev_processor.py`
-7. `backend/rpi_bridge/bridge_core.py`
-8. `backend/robot_receiver/robot_receiver.py`
-9. `wiki/architecture.md`
-10. `wiki/function_index.md`
-
----
-
-## 快速自测
-
-```bash
-python3 -m unittest tests.test_protocol_and_planner
-```
-
----
-
-## 说明
-
-这版重点是：
-
-- 让你现在已经可用的通信链路继续工作。
-- 把地面站升级成适合开发与调试的 GUI。
-- 尽量不改变你原本的部署逻辑。
-
-如果你后面要继续扩展：
-
-- 把视觉检测结果直接转成 obstacle mask；
-- 把 GCS 本地规划替换成更强路径规划器；
-- 把 robot 真机位姿反馈并入地图；
-- 把无人机标注 / 地面机器人状态 / 多传感器结果做统一图层；
-
-这套结构都可以继续加。
+并会自动创建 `ag/wiki/` 输出目录。

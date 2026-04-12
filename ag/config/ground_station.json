@@ -1,0 +1,32 @@
+{
+  "sky_host": "127.0.0.1",
+  "sky_port": 46001,
+  "reconnect_interval_sec": 1.0,
+  "target_speed": 0.2,
+  "rtsp_url": "rtsp://127.0.0.1:8554/video",
+  "rtsp_pipeline": "",
+  "video_fps_limit": 20.0,
+  "bev_process_every_n": 2,
+  "map": {
+    "x_min": -1.0,
+    "x_max": 1.0,
+    "y_min": -1.0,
+    "y_max": 1.0,
+    "ppm": 300
+  },
+  "planning": {
+    "resolution_m": 0.05,
+    "robot_radius_m": 0.1
+  },
+  "bev": {
+    "enabled": true,
+    "calibration_path": "config/calibration.yaml",
+    "target_id": 0,
+    "tag_size": 0.09,
+    "x_min": -1.0,
+    "x_max": 1.0,
+    "y_min": -1.0,
+    "y_max": 1.0,
+    "ppm": 300
+  }
+}

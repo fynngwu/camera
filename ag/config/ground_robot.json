@@ -1,0 +1,5 @@
+{
+  "sky_host": "127.0.0.1",
+  "sky_port": 47001,
+  "reconnect_sec": 1.0
+}

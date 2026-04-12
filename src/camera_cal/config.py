@@ -6,6 +6,7 @@ settings.
 """
 
 from dataclasses import dataclass
+import cv2
 
 
 @dataclass
@@ -18,7 +19,7 @@ class CalibrationConfig:
     min_samples: int = 12  # Minimum number of images for calibration
 
     # Calibration parameters
-    calib_flags: int = 2048  # cv2.CALIB_FIX_K3
+    calib_flags: int = cv2.CALIB_FIX_K3
     alpha: float = 1.0  # Free scaling parameter for undistortion
 
     # UI configuration

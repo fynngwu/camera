@@ -36,11 +36,17 @@ DEFAULT_CONFIG: Dict[str, Dict[str, Any]] = {
         "max_vx": 0.25,
         "max_wz": 0.80,
     },
+    "simulator": {
+        "initial_pose": [0.0, 0.0, 0.0],
+        "noise_xy": 0.0,
+        "noise_yaw": 0.0,
+    },
     "bev": {
         "enabled": True,
         "calibration_path": "config/calibration.yaml",
         "target_id": 0,
         "tag_size": 0.09,
+        "aruco_dict": "DICT_4X4_50",
     },
 }
 

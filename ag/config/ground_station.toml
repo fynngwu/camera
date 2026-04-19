@@ -1,5 +1,5 @@
 [rtsp]
-url = "rtsp://10.28.215.179:8554/cam"
+url = "rtsp://100.103.8.66:8554/cam"
 retry_sec = 1.0
 fps_limit = 20.0
 
@@ -31,3 +31,4 @@ enabled = true
 calibration_path = "config/calibration.yaml"
 target_id = 0
 tag_size = 0.09
+aruco_dict = "DICT_4X4_50"

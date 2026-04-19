@@ -34,3 +34,7 @@ class RuntimeStateMachine:
     def finish_cancel(self) -> str:
         self.state = "idle"
         return self.state
+
+    def finish_execution(self) -> str:
+        self.state = "idle"
+        return self.state

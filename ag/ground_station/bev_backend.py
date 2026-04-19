@@ -11,11 +11,6 @@ import cv2
 import numpy as np
 import yaml
 
-try:  # pragma: no cover
-    from pupil_apriltags import Detector
-except Exception:  # pragma: no cover
-    Detector = None
-
 
 LogCallback = Callable[[str, str], None]
 FrameCallback = Callable[[np.ndarray], None]
@@ -24,12 +19,13 @@ MetaCallback = Callable[[Dict[str, object]], None]
 
 @dataclass
 class BevConfig:
-    """Configuration for AprilTag based BEV processing."""
+    """Configuration for ArUco based BEV processing."""
 
     enabled: bool = True
     calibration_path: str = "config/calibration.yaml"
     target_id: int = 0
     tag_size: float = 0.09
+    aruco_dict: str = "DICT_4X4_50"
     x_min: float = -1.0
     x_max: float = 1.0
     y_min: float = -1.0
@@ -38,7 +34,7 @@ class BevConfig:
 
 
 class AprilTagBevProcessor:
-    """Convert raw image to BEV image with AprilTag perspective anchoring."""
+    """Convert raw image to BEV image with ArUco marker perspective anchoring."""
 
     def __init__(self, config: BevConfig) -> None:
         self.config = config
@@ -46,16 +42,10 @@ class AprilTagBevProcessor:
         self.map2 = None
         self.last_bev: Optional[np.ndarray] = None
         self.detector = None
-        if config.enabled and Detector is not None:
-            self.detector = Detector(
-                families="tag36h11",
-                nthreads=max(1, min(4, os.cpu_count() or 2)),
-                quad_decimate=1.5,
-                quad_sigma=0.0,
-                refine_edges=1,
-                decode_sharpening=0.5,
-                debug=0,
-            )
+        if config.enabled:
+            dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+            parameters = cv2.aruco.DetectorParameters()
+            self.detector = cv2.aruco.ArucoDetector(dictionary, parameters)
 
     @property
     def bev_size(self) -> Tuple[int, int]:
@@ -83,25 +73,28 @@ class AprilTagBevProcessor:
 
         gray = cv2.cvtColor(undistorted, cv2.COLOR_BGR2GRAY)
         t0 = time.perf_counter()
-        detections = self.detector.detect(gray)
+        corners_list, ids, _ = self.detector.detectMarkers(gray)
         detect_ms = (time.perf_counter() - t0) * 1000.0
 
         tag = None
-        for det in detections:
-            if int(det.tag_id) == int(self.config.target_id):
-                tag = det
-                break
+        if ids is not None:
+            for raw_corners, tag_id in zip(corners_list, ids.reshape(-1)):
+                if int(tag_id) == int(self.config.target_id):
+                    corners = np.asarray(raw_corners, dtype=np.float32).reshape(4, 2)
+                    # cv2.aruco corners are TL/TR/BR/BL; reorder to BL/BR/TR/TL
+                    corners = corners[[3, 2, 1, 0], :]
+                    tag = corners
+                    break
 
         if tag is None:
             if self.last_bev is not None:
                 bev = self.last_bev.copy()
             return undistorted, bev, {"mode": "no_tag", "tag_detected": False, "detect_ms": detect_ms}
 
-        corners = tag.corners.astype(np.float32)
-        cv2.polylines(undistorted, [corners.astype(np.int32)], True, (0, 255, 0), 2)
+        cv2.polylines(undistorted, [tag.astype(np.int32)], True, (0, 255, 0), 2)
         cv2.putText(
             undistorted,
-            f"tag={tag.tag_id} {detect_ms:.1f}ms",
+            f"aruco={self.config.target_id} {detect_ms:.1f}ms",
             (20, 28),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
@@ -119,12 +112,12 @@ class AprilTagBevProcessor:
             ],
             dtype=np.float32,
         )
-        matrix = cv2.getPerspectiveTransform(corners, dst)
+        matrix = cv2.getPerspectiveTransform(tag, dst)
         warped = cv2.warpPerspective(undistorted, matrix, (width, height))
         bev = cv2.addWeighted(bev, 0.25, warped, 0.75, 0.0)
         self._draw_grid(bev)
         self.last_bev = bev
-        return undistorted, bev, {"mode": "apriltag", "tag_detected": True, "detect_ms": detect_ms, "tag_id": int(tag.tag_id)}
+        return undistorted, bev, {"mode": "aruco", "tag_detected": True, "detect_ms": detect_ms, "tag_id": int(self.config.target_id)}
 
     def world_to_pixel(self, x: float, y: float) -> Tuple[float, float]:
         width, height = self.bev_size

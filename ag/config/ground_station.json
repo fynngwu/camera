@@ -3,7 +3,7 @@
   "sky_port": 46001,
   "reconnect_interval_sec": 1.0,
   "target_speed": 0.2,
-  "rtsp_url": "rtsp://127.0.0.1:8554/video",
+  "rtsp_url": "rtsp://10.28.215.179:8554/cam",
   "rtsp_pipeline": "",
   "video_fps_limit": 20.0,
   "bev_process_every_n": 2,

@@ -22,7 +22,9 @@ ag/
 ├── sky_uav/
 │   ├── rtsp_server.py              # 独立 RTSP 服务
 │   ├── tcp_connector.py            # TCP 枢纽：连接 GCS 与 robot
-│   └── pose_controller.py          # 虚拟位姿 + 三次样条平滑 + 逐点跟踪
+│   ├── robot_simulator.py          # 只负责积分 x/y/yaw
+│   ├── path_executor.py            # Quintic 参考路径 + 简洁 cmd_vel 计算
+│   └── pose_controller.py          # 薄编排层：simulator + executor
 ├── ground_station/
 │   ├── frontend.py                 # Qt 前端（RTSP/BEV + 路径交互 + cmd 可视化）
 │   ├── bev_backend.py              # RTSP 接收 + AprilTag BEV
@@ -83,10 +85,10 @@ ag/
 
 ## 路径执行策略（天空端）
 
-- 地面站发送 A* 折线后，天空端先进行三次样条（Catmull-Rom）平滑
-- 再按固定弧长步长重采样
-- 控制线程周期更新虚拟位姿（odom 积分）
-- 逐点跟踪输出 `vx/vy/wz`
+- 地面站发送 A* 折线后，天空端按固定步长生成 quintic 参考点
+- `robot_simulator` 只做 `vx/vy/wz -> x/y/yaw` 的积分
+- `path_executor` 只做“选参考点 + 输出 `vx/vy/wz`”
+- `pose_controller` 只负责周期调度和状态拼装
 - 到达终点阈值后输出零速并在 `telemetry.goal_reached=true`
 
 ## 启动方式
@@ -106,6 +108,20 @@ ag/
 3. `run_sky_rtsp.sh`
 4. `run_ground_station.sh`
 
+## 近期计划：架构简化
+
+当前三端架构（ground_station -> sky_uav -> ground_robot）将简化为两端：
+
+- **天空端**：只负责相机推流（RTSP），不再参与控制逻辑
+- **地面站**：承担全部计算（视觉定位、路径规划、速度指令生成），直接向地面机器人发送 `cmd_vel`
+- **地面机器人**：接收端不变
+
+即控制链路从 `GCS -> Sky -> Robot` 简化为 `GCS -> Robot`，天空端退化为纯视频源。
+
+下一步：
+1. 重写地面站前端
+2. 测试地面站与机器人之间的直接通信
+
 ## 测试
 
 ```bash
@@ -115,7 +131,7 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 
 测试覆盖：
 - 协议字段校验（`path/cmd_vel/telemetry`）
-- 三次样条平滑与重采样基本性质
+- Quintic 参考路径与跟踪基本性质
 - 虚拟 odom 与控制输出（直线/转向/到点停车）
 - 本机回环集成（地面站 -> 天空端 -> 机器人）
 

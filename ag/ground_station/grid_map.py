@@ -11,17 +11,17 @@ WorldPoint = tuple[float, float]
 
 @dataclass(frozen=True)
 class RectObstacle:
-    x0: float
-    y0: float
-    x1: float
-    y1: float
+    x_min: float
+    y_min: float
+    x_max: float
+    y_max: float
 
     def normalized(self) -> "RectObstacle":
         return RectObstacle(
-            min(self.x0, self.x1),
-            min(self.y0, self.y1),
-            max(self.x0, self.x1),
-            max(self.y0, self.y1),
+            min(self.x_min, self.x_max),
+            min(self.y_min, self.y_max),
+            max(self.x_min, self.x_max),
+            max(self.y_min, self.y_max),
         )
 
 
@@ -79,8 +79,8 @@ class GridMapper:
         grid = [[False for _ in range(self.width)] for _ in range(self.height)]
         for rect in rects:
             norm = rect.normalized()
-            x0, y0 = self.world_to_grid(norm.x0, norm.y0)
-            x1, y1 = self.world_to_grid(norm.x1, norm.y1)
+            x0, y0 = self.world_to_grid(norm.x_min, norm.y_min)
+            x1, y1 = self.world_to_grid(norm.x_max, norm.y_max)
             for iy in range(min(y0, y1), max(y0, y1) + 1):
                 for ix in range(min(x0, x1), max(x0, x1) + 1):
                     grid[iy][ix] = True

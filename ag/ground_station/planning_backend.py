@@ -13,30 +13,13 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from common.protocol import decode_message, encode_message, make_message, validate_telemetry
+from ground_station.grid_map import RectObstacle as ObstacleRect
 
 
 WorldPoint = Tuple[float, float]
 LogCallback = Callable[[str, str], None]
 TelemetryCallback = Callable[[Dict[str, Any]], None]
 ConnectionCallback = Callable[[bool], None]
-
-
-@dataclass
-class ObstacleRect:
-    """Axis-aligned obstacle rectangle in world coordinates."""
-
-    x_min: float
-    y_min: float
-    x_max: float
-    y_max: float
-
-    def normalized(self) -> "ObstacleRect":
-        return ObstacleRect(
-            x_min=min(self.x_min, self.x_max),
-            y_min=min(self.y_min, self.y_max),
-            x_max=max(self.x_min, self.x_max),
-            y_max=max(self.y_min, self.y_max),
-        )
 
 
 @dataclass

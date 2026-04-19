@@ -38,6 +38,13 @@ class GridMapTests(unittest.TestCase):
         )
         self.assertTrue(any(any(row) for row in occupancy))
 
+    def test_rect_obstacle_normalizes_reversed_corners(self) -> None:
+        occupancy = self.mapper.build_occupancy(
+            rects=[RectObstacle(0.2, 0.2, 0.0, 0.0)],
+            lines=[],
+        )
+        self.assertTrue(any(any(row) for row in occupancy))
+
     def test_line_obstacle_marks_cells(self) -> None:
         occupancy = self.mapper.build_occupancy(
             rects=[],

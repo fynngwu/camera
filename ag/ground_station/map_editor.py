@@ -26,6 +26,7 @@ class MapEditor:
     locked: bool = False
     erase_radius: float = 0.08
     _pending_rect_start: Optional[WorldPoint] = None
+    _pending_line_start: Optional[WorldPoint] = None
     _active_line: Optional[LineObstacle] = None
 
     def set_tool(self, tool: ToolMode) -> None:
@@ -33,6 +34,7 @@ class MapEditor:
         if tool != ToolMode.DRAW_RECT:
             self._pending_rect_start = None
         if tool != ToolMode.DRAW_LINE:
+            self._pending_line_start = None
             self._active_line = None
 
     def left_click(self, point: WorldPoint) -> None:
@@ -54,6 +56,7 @@ class MapEditor:
         if self.locked:
             return
         if self.tool == ToolMode.DRAW_LINE:
+            self._pending_line_start = None
             self._active_line = None
 
     def _left_click_rect(self, point: WorldPoint) -> None:
@@ -64,9 +67,13 @@ class MapEditor:
         self._pending_rect_start = None
 
     def _left_click_line(self, point: WorldPoint) -> None:
+        if self._active_line is None and self._pending_line_start is None:
+            self._pending_line_start = point
+            return
         if self._active_line is None:
-            self._active_line = LineObstacle(points=[point])
+            self._active_line = LineObstacle(points=[self._pending_line_start, point])
             self.lines.append(self._active_line)
+            self._pending_line_start = None
             return
         self._active_line.points.append(point)
 
@@ -77,7 +84,7 @@ class MapEditor:
 
         for idx, rect in enumerate(self.rectangles):
             norm = rect.normalized()
-            if norm.x0 <= point[0] <= norm.x1 and norm.y0 <= point[1] <= norm.y1:
+            if norm.x_min <= point[0] <= norm.x_max and norm.y_min <= point[1] <= norm.y_max:
                 del self.rectangles[idx]
                 return
 

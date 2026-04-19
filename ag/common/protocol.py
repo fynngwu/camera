@@ -1,4 +1,4 @@
-"""Shared protocol helpers for AG three-end architecture."""
+"""Shared protocol helpers for the ground-station refactor."""
 from __future__ import annotations
 
 import json
@@ -7,11 +7,6 @@ from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 
 WorldPoint = Tuple[float, float]
-
-
-def now_ts() -> float:
-    """Return current UNIX timestamp."""
-    return time.time()
 
 
 def clamp(value: float, minimum: float, maximum: float) -> float:
@@ -35,9 +30,37 @@ def make_message(message_type: str, **fields: Any) -> Dict[str, Any]:
     return msg
 
 
+def now_ts() -> float:
+    """Return current UNIX timestamp."""
+    return time.time()
+
+
 def encode_message(message: Dict[str, Any]) -> bytes:
-    """Encode one message to JSON Lines bytes."""
-    return (json.dumps(message, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    """Encode one generic JSON-lines message."""
+    return _encode_message(message)
+
+
+def encode_cmd_vel(vx: float, vy: float, wz: float, timestamp: float) -> bytes:
+    """Encode one `cmd_vel` JSON-lines message."""
+    return _encode_message(
+        make_message(
+            "cmd_vel",
+            vx=float(vx),
+            vy=float(vy),
+            wz=float(wz),
+            timestamp=float(timestamp),
+        )
+    )
+
+
+def encode_reach_goal(timestamp: float) -> bytes:
+    """Encode one `reach_goal` JSON-lines message."""
+    return _encode_message(
+        make_message(
+            "reach_goal",
+            timestamp=float(timestamp),
+        )
+    )
 
 
 def decode_message(line: bytes | str) -> Dict[str, Any]:
@@ -52,6 +75,11 @@ def decode_message(line: bytes | str) -> Dict[str, Any]:
     if "type" not in obj:
         raise ValueError("message missing required field 'type'")
     return obj
+
+
+def _encode_message(message: Dict[str, Any]) -> bytes:
+    """Encode one message to JSON Lines bytes."""
+    return (json.dumps(message, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
 
 
 def _require_numeric(message: Dict[str, Any], fields: Sequence[str], message_type: str) -> None:

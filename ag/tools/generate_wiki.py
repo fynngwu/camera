@@ -9,7 +9,6 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC_DIRS = [
     ROOT / "common",
     ROOT / "ground_robot",
-    ROOT / "sky_uav",
     ROOT / "ground_station",
 ]
 OUT_PATH = ROOT / "wiki" / "function_index.md"

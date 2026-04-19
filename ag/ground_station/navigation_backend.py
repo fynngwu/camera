@@ -1,4 +1,4 @@
-"""Shared A* planning and pure-pursuit execution backend for the GCS."""
+"""Shared A* planning and omnidirectional P-controller execution backend for the GCS."""
 from __future__ import annotations
 
 import heapq
@@ -55,11 +55,19 @@ def _clamp(value: float, low: float, high: float) -> float:
 @dataclass(frozen=True)
 class ControlConfig:
     control_hz: float = 20.0
-    lookahead_m: float = 0.25
+    lookahead_m: float = 0.15
     goal_tolerance_m: float = 0.08
-    slowdown_radius_m: float = 0.35
-    max_vx: float = 0.25
-    max_wz: float = 0.80
+    kx: float = 1.5
+    ky: float = 2.0
+    kth: float = 3.0
+    max_vx: float = 0.50
+    max_vy: float = 0.50
+    max_wz: float = 1.0
+    ax_max: float = 1.0
+    ay_max: float = 1.0
+    aw_max: float = 2.0
+    min_dist: float = 0.05
+    min_angle_deg: float = 8.0
 
 
 class AStarPlanner:
@@ -194,72 +202,180 @@ class AStarPlanner:
         return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
-class PurePursuitController:
-    """Pure-pursuit tracker that uses the GCS pose directly."""
+class OmniController:
+    """Omnidirectional P-controller: projects onto path, looks ahead, drives in body frame."""
 
     def __init__(self, config: dict[str, Any]) -> None:
         self.cfg = ControlConfig(**{**ControlConfig().__dict__, **config})
         self.path: list[WorldPoint] = []
-        self._progress_index = 0
+        self._prev_cmd: tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self._prev_time: float | None = None
+        self.nearest_point: WorldPoint | None = None
+        self.target_point: WorldPoint | None = None
 
     def set_path(self, path: Sequence[WorldPoint]) -> None:
-        self.path = [(float(x), float(y)) for x, y in path]
-        self._progress_index = 0
+        self.path = _simplify_path([(float(x), float(y)) for x, y in path], self.cfg.min_dist, self.cfg.min_angle_deg)
+        self._prev_cmd = (0.0, 0.0, 0.0)
+        self._prev_time = None
 
     def clear_path(self) -> None:
         self.path = []
-        self._progress_index = 0
+        self._prev_cmd = (0.0, 0.0, 0.0)
+        self._prev_time = None
+        self.nearest_point = None
+        self.target_point = None
 
     def compute_command(self, pose: Pose2D, *, timestamp: float) -> tuple[VelocityCommand, bool]:
         if len(self.path) < 2:
             return self._zero(timestamp), False
 
-        goal_x, goal_y = self.path[-1]
-        goal_distance = math.hypot(goal_x - pose.x, goal_y - pose.y)
-        if goal_distance <= self.cfg.goal_tolerance_m:
+        # Goal check
+        gx, gy = self.path[-1]
+        if math.hypot(gx - pose.x, gy - pose.y) <= self.cfg.goal_tolerance_m:
             return self._zero(timestamp), True
 
-        closest_index = min(
-            range(self._progress_index, len(self.path)),
-            key=lambda index: (self.path[index][0] - pose.x) ** 2 + (self.path[index][1] - pose.y) ** 2,
-        )
-        self._progress_index = closest_index
+        # Nearest projection on path segments
+        nearest = _nearest_projection(pose.x, pose.y, self.path)
+        self.nearest_point = (nearest["qx"], nearest["qy"])
 
-        lookahead = self.path[-1]
-        for index in range(closest_index, len(self.path)):
-            point = self.path[index]
-            if math.hypot(point[0] - pose.x, point[1] - pose.y) >= self.cfg.lookahead_m:
-                lookahead = point
-                self._progress_index = index
-                break
+        # Lookahead point + reference heading
+        tx, ty, yaw_ref = _lookahead_point(self.path, nearest, self.cfg.lookahead_m)
+        self.target_point = (tx, ty)
 
-        x_local, y_local = world_to_robot_frame(pose, lookahead)
-        heading_error = normalize_angle(math.atan2(y_local, x_local))
-        if abs(heading_error) > (math.pi / 2.0):
-            return (
-                VelocityCommand(
-                    v_x=0.0,
-                    v_y=0.0,
-                    w_z=_clamp(heading_error, -self.cfg.max_wz, self.cfg.max_wz),
-                    timestamp=timestamp,
-                ),
-                False,
-            )
+        # World-frame error → body-frame error
+        ex, ey = world_to_robot_frame(pose, (tx, ty))
+        etheta = normalize_angle(yaw_ref - pose.yaw)
 
-        speed_scale = 1.0
-        if goal_distance < self.cfg.slowdown_radius_m:
-            ratio = _clamp(goal_distance / max(self.cfg.slowdown_radius_m, 1e-6), 0.0, 1.0)
-            speed_scale = ratio * ratio * (3.0 - (2.0 * ratio))
+        # P-control
+        vx = self.cfg.kx * ex
+        vy = self.cfg.ky * ey
+        wz = self.cfg.kth * etheta
 
-        lookahead_distance = max(math.hypot(x_local, y_local), 1e-6)
-        curvature = 2.0 * y_local / (lookahead_distance * lookahead_distance)
-        vx = self.cfg.max_vx * speed_scale
-        wz = _clamp(curvature * vx, -self.cfg.max_wz, self.cfg.max_wz)
-        return VelocityCommand(v_x=vx, v_y=0.0, w_z=wz, timestamp=timestamp), False
+        # Clamp to max velocities
+        vx = _clamp(vx, -self.cfg.max_vx, self.cfg.max_vx)
+        vy = _clamp(vy, -self.cfg.max_vy, self.cfg.max_vy)
+        wz = _clamp(wz, -self.cfg.max_wz, self.cfg.max_wz)
+
+        # Rate-limit (acceleration clamp)
+        dt = max(timestamp - self._prev_time, 1e-6) if self._prev_time is not None else 0.05
+        px, py, pw = self._prev_cmd
+        vx = _clamp(vx, px - self.cfg.ax_max * dt, px + self.cfg.ax_max * dt)
+        vy = _clamp(vy, py - self.cfg.ay_max * dt, py + self.cfg.ay_max * dt)
+        wz = _clamp(wz, pw - self.cfg.aw_max * dt, pw + self.cfg.aw_max * dt)
+
+        self._prev_cmd = (vx, vy, wz)
+        self._prev_time = timestamp
+        return VelocityCommand(v_x=vx, v_y=vy, w_z=wz, timestamp=timestamp), False
 
     @staticmethod
     def _zero(timestamp: float) -> VelocityCommand:
         return VelocityCommand(v_x=0.0, v_y=0.0, w_z=0.0, timestamp=timestamp)
+
+
+# ---------------------------------------------------------------------------
+# Path helpers used by OmniController
+# ---------------------------------------------------------------------------
+
+def _simplify_path(
+    points: list[WorldPoint],
+    min_dist: float,
+    min_angle_deg: float,
+) -> list[WorldPoint]:
+    """Remove close-together and nearly-collinear points."""
+    if len(points) <= 2:
+        return points[:]
+
+    # Pass 1: drop points too close together
+    filtered: list[WorldPoint] = [points[0]]
+    for p in points[1:]:
+        if math.hypot(p[0] - filtered[-1][0], p[1] - filtered[-1][1]) >= min_dist:
+            filtered.append(p)
+    if len(filtered) <= 2:
+        return filtered
+
+    # Pass 2: drop nearly-collinear interior points
+    min_angle = math.radians(min_angle_deg)
+    out: list[WorldPoint] = [filtered[0]]
+    for i in range(1, len(filtered) - 1):
+        p0 = out[-1]
+        p1 = filtered[i]
+        p2 = filtered[i + 1]
+        v1x, v1y = p1[0] - p0[0], p1[1] - p0[1]
+        v2x, v2y = p2[0] - p1[0], p2[1] - p1[1]
+        n1 = math.hypot(v1x, v1y)
+        n2 = math.hypot(v2x, v2y)
+        if n1 < 1e-9 or n2 < 1e-9:
+            continue
+        cos_a = _clamp((v1x * v2x + v1y * v2y) / (n1 * n2), -1.0, 1.0)
+        if math.acos(cos_a) >= min_angle:
+            out.append(p1)
+    out.append(filtered[-1])
+    return out
+
+
+def _nearest_projection(
+    px: float, py: float, path: list[WorldPoint],
+) -> dict:
+    """Find the closest point on the polyline to (px, py)."""
+    best_dist = 1e18
+    best: dict = {"seg": 0, "qx": path[0][0], "qy": path[0][1], "t": 0.0}
+    for i in range(len(path) - 1):
+        ax, ay = path[i]
+        bx, by = path[i + 1]
+        dx, dy = bx - ax, by - ay
+        l2 = dx * dx + dy * dy
+        if l2 < 1e-12:
+            t = 0.0
+        else:
+            t = _clamp(((px - ax) * dx + (py - ay) * dy) / l2, 0.0, 1.0)
+        qx = ax + t * dx
+        qy = ay + t * dy
+        d = math.hypot(px - qx, py - qy)
+        if d < best_dist:
+            best_dist = d
+            best = {"seg": i, "qx": qx, "qy": qy, "t": t}
+    return best
+
+
+def _lookahead_point(
+    path: list[WorldPoint],
+    nearest: dict,
+    lookahead_dist: float,
+) -> tuple[float, float, float]:
+    """Walk forward along path from nearest projection by lookahead_dist.
+
+    Returns (target_x, target_y, reference_yaw).
+    """
+    i = nearest["seg"]
+    qx, qy = nearest["qx"], nearest["qy"]
+
+    # Remaining distance on current segment
+    bx, by = path[i + 1]
+    remain = math.hypot(bx - qx, by - qy)
+
+    if remain >= lookahead_dist:
+        ratio = lookahead_dist / max(remain, 1e-12)
+        tx = qx + ratio * (bx - qx)
+        ty = qy + ratio * (by - qy)
+        return tx, ty, math.atan2(by - qy, bx - qx)
+
+    # Walk subsequent segments
+    dist_left = lookahead_dist - remain
+    for j in range(i + 1, len(path) - 1):
+        ax, ay = path[j]
+        bx, by = path[j + 1]
+        seg_len = math.hypot(bx - ax, by - ay)
+        if seg_len >= dist_left:
+            ratio = dist_left / max(seg_len, 1e-12)
+            tx = ax + ratio * (bx - ax)
+            ty = ay + ratio * (by - ay)
+            return tx, ty, math.atan2(by - ay, bx - ax)
+        dist_left -= seg_len
+
+    # Past the end — target is the last point, heading from second-to-last segment
+    ax, ay = path[-2]
+    bx, by = path[-1]
+    return bx, by, math.atan2(by - ay, bx - ax)
 
 
 class GroundStationRuntime:
@@ -279,7 +395,7 @@ class GroundStationRuntime:
             )
         )
         self.planner = AStarPlanner(self.mapper)
-        self.controller = PurePursuitController(config.get("control", {}))
+        self.controller = OmniController(config.get("control", {}))
         self.server = GcsServer(
             host=str(config["server"]["host"]),
             port=int(config["server"]["port"]),
@@ -326,7 +442,9 @@ class GroundStationRuntime:
         self.occupancy = self.mapper.build_occupancy(rects, lines)
         start = (self.current_pose.x, self.current_pose.y)
         self.current_goal = (float(goal[0]), float(goal[1]))
-        self.current_path = self.planner.plan(start, self.current_goal, rects, lines, occupancy=self.occupancy)
+        raw_path = self.planner.plan(start, self.current_goal, rects, lines, occupancy=self.occupancy)
+        self.controller.set_path(raw_path)
+        self.current_path = list(self.controller.path)
         self.state.to_planned()
         return list(self.current_path)
 
@@ -338,7 +456,6 @@ class GroundStationRuntime:
             robot_connected=self.connected,
         ):
             raise ValueError("execution prerequisites are not satisfied")
-        self.controller.set_path(self.current_path)
         self.state.to_executing()
 
     def cancel(self) -> None:

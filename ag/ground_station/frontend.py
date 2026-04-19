@@ -139,6 +139,8 @@ class MapCanvas(QWidget):
         self.cmd = VelocityCommand(v_x=0.0, v_y=0.0, w_z=0.0, timestamp=0.0)
         self.current_path: list[WorldPoint] = []
         self.occupancy: list[list[bool]] | None = None
+        self.nearest_point: Optional[WorldPoint] = None
+        self.target_point: Optional[WorldPoint] = None
         self._background: Optional[QImage] = None
         self._mouse_world: Optional[WorldPoint] = None
         self._tool_cycle_idx: int = 0
@@ -157,6 +159,13 @@ class MapCanvas(QWidget):
 
     def set_path(self, path: list[WorldPoint]) -> None:
         self.current_path = list(path)
+        self.nearest_point = None
+        self.target_point = None
+        self.update()
+
+    def set_tracking_debug(self, nearest: Optional[WorldPoint], target: Optional[WorldPoint]) -> None:
+        self.nearest_point = nearest
+        self.target_point = target
         self.update()
 
     def set_occupancy(self, grid: list[list[bool]]) -> None:
@@ -189,6 +198,7 @@ class MapCanvas(QWidget):
         self._draw_obstacles(painter, draw_rect)
         self._draw_goal(painter, draw_rect)
         self._draw_path(painter, draw_rect)
+        self._draw_tracking_debug(painter, draw_rect)
         self._draw_pose(painter, draw_rect)
         self._draw_cmd_arrow(painter, draw_rect)
         self._draw_drag_preview(painter, draw_rect)
@@ -277,6 +287,26 @@ class MapCanvas(QWidget):
         if prev is not None:
             painter.setPen(QColor(255, 220, 0))
             painter.drawText(prev + QPointF(6, -6), f"path({len(self.current_path)})")
+
+    def _draw_tracking_debug(self, painter: QPainter, draw_rect: QRectF) -> None:
+        # Nearest projection point (blue)
+        if self.nearest_point is not None:
+            p = self._world_to_widget(self.nearest_point[0], self.nearest_point[1], draw_rect)
+            if p is not None:
+                painter.setPen(QPen(QColor(0, 150, 255), 2))
+                painter.setBrush(QBrush(QColor(0, 150, 255)))
+                painter.drawEllipse(p, 5, 5)
+                painter.setPen(QColor(0, 150, 255))
+                painter.drawText(p + QPointF(6, -6), "proj")
+        # Lookahead target point (magenta)
+        if self.target_point is not None:
+            p = self._world_to_widget(self.target_point[0], self.target_point[1], draw_rect)
+            if p is not None:
+                painter.setPen(QPen(QColor(255, 0, 255), 2))
+                painter.setBrush(QBrush(QColor(255, 0, 255)))
+                painter.drawEllipse(p, 5, 5)
+                painter.setPen(QColor(255, 0, 255))
+                painter.drawText(p + QPointF(6, -6), "target")
 
     def _draw_pose(self, painter: QPainter, draw_rect: QRectF) -> None:
         if self.pose is None:
@@ -533,6 +563,10 @@ class MainWindow(QMainWindow):
     def _on_tick(self) -> None:
         cmd = self.runtime.tick()
         self.map_canvas.set_pose_and_cmd(self.runtime.current_pose, cmd)
+        self.map_canvas.set_tracking_debug(
+            self.runtime.controller.nearest_point,
+            self.runtime.controller.target_point,
+        )
         self.cmd_label.setText(f"cmd: vx={cmd.v_x:.3f} vy={cmd.v_y:.3f} wz={cmd.w_z:.3f}")
         if self.runtime.current_pose is not None:
             p = self.runtime.current_pose

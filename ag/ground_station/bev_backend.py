@@ -17,6 +17,15 @@ FrameCallback = Callable[[np.ndarray], None]
 MetaCallback = Callable[[Dict[str, object]], None]
 
 
+def _limit_opencv_threads(max_threads: int = 3) -> int:
+    """Cap OpenCV worker threads to avoid oversubscribing CPU for ArUco work."""
+    thread_cap = max(1, int(max_threads))
+    current = int(cv2.getNumThreads())
+    chosen = min(current, thread_cap) if current > 0 else thread_cap
+    cv2.setNumThreads(chosen)
+    return chosen
+
+
 @dataclass
 class BevConfig:
     """Configuration for ArUco based BEV processing."""
@@ -53,14 +62,25 @@ class AprilTagBevProcessor:
         height = int((self.config.y_max - self.config.y_min) * self.config.ppm)
         return max(32, width), max(32, height)
 
-    def process(self, frame: np.ndarray) -> Tuple[np.ndarray, np.ndarray, Dict[str, object]]:
+    def prepare_raw_frame(self, frame: np.ndarray) -> np.ndarray:
+        """Apply the cheap raw-view transform every frame to avoid view flicker."""
+        if frame is None or frame.size == 0:
+            return frame
+        return self._undistort(frame)
+
+    def process(
+        self,
+        frame: np.ndarray,
+        *,
+        frame_is_undistorted: bool = False,
+    ) -> Tuple[np.ndarray, np.ndarray, Dict[str, object]]:
         """Process one frame and return (raw_annotated, bev, meta)."""
         width, height = self.bev_size
-        raw = frame.copy()
         if frame is None or frame.size == 0:
-            return raw, np.zeros((height, width, 3), dtype=np.uint8), {"mode": "empty", "tag_detected": False}
+            return frame, np.zeros((height, width, 3), dtype=np.uint8), {"mode": "empty", "tag_detected": False}
 
-        undistorted = self._undistort(frame)
+        undistorted = frame if frame_is_undistorted else self.prepare_raw_frame(frame)
+        raw = undistorted.copy()
         bev = np.zeros((height, width, 3), dtype=np.uint8)
         bev[:] = (24, 24, 24)
         self._draw_grid(bev)
@@ -175,6 +195,7 @@ class BevBackend:
         self.rtsp_url = str(rtsp_url)
         self.fps_limit = float(fps_limit)
         self.process_every_n = max(1, int(process_every_n))
+        self._opencv_threads = _limit_opencv_threads(3)
         self.processor = AprilTagBevProcessor(bev_config)
         self.on_raw_frame = on_raw_frame
         self.on_bev_frame = on_bev_frame
@@ -213,56 +234,43 @@ class BevBackend:
             ],
         )
         if not cap.isOpened():
+            cap.release()
             self._log("ERROR", f"failed to open rtsp source: {self.rtsp_url}")
             return
-        self._log("INFO", f"rtsp opened (ffmpeg): {self.rtsp_url}")
-
-        # Background reader thread keeps grabbing latest frames
-        latest: dict = {"frame": None}
-        lock = threading.Lock()
-
-        def _reader() -> None:
-            while not self._stop_event.is_set():
-                if not cap.grab():
-                    continue
-                ok, frame = cap.retrieve()
-                if not ok:
-                    continue
-                with lock:
-                    latest["frame"] = frame
-
-        reader_thread = threading.Thread(target=_reader, daemon=True)
-        reader_thread.start()
-
-        frame_idx = 0
-        target_period = 1.0 / max(1.0, self.fps_limit)
         try:
-            while not self._stop_event.is_set():
-                tick = time.perf_counter()
-                with lock:
-                    frame = None if latest["frame"] is None else latest["frame"].copy()
-                if frame is None:
-                    time.sleep(0.01)
-                    continue
-
-                raw, bev, meta = self.processor.process(frame)
-                frame_idx += 1
-
-                if self.on_raw_frame is not None:
-                    self.on_raw_frame(raw)
-                if frame_idx % self.process_every_n == 0:
-                    if self.on_bev_frame is not None:
-                        self.on_bev_frame(bev)
-                    if self.on_meta is not None:
-                        self.on_meta(meta)
-
-                dt = time.perf_counter() - tick
-                sleep_sec = target_period - dt
-                if sleep_sec > 0.0:
-                    time.sleep(sleep_sec)
+            self._run_capture_session(cap)
         finally:
             cap.release()
             self._log("INFO", "rtsp stopped")
+
+    def _run_capture_session(self, cap) -> None:
+        self._log("INFO", f"rtsp opened (ffmpeg): {self.rtsp_url}")
+        frame_idx = 0
+        target_period = 1.0 / max(1.0, self.fps_limit)
+        miss_sleep_sec = min(target_period, 0.05)
+
+        while not self._stop_event.is_set():
+            tick = time.perf_counter()
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                time.sleep(miss_sleep_sec)
+                continue
+
+            frame_idx += 1
+            raw = self.processor.prepare_raw_frame(frame)
+            if frame_idx % self.process_every_n == 0:
+                _, bev, meta = self.processor.process(raw, frame_is_undistorted=True)
+                if self.on_bev_frame is not None:
+                    self.on_bev_frame(bev)
+                if self.on_meta is not None:
+                    self.on_meta(meta)
+
+            if self.on_raw_frame is not None:
+                self.on_raw_frame(raw)
+
+            sleep_sec = target_period - (time.perf_counter() - tick)
+            if sleep_sec > 0.0:
+                time.sleep(sleep_sec)
 
     def _log(self, level: str, text: str) -> None:
         if self.on_log is not None:

@@ -1,7 +1,0 @@
-{
-  "type": "path",
-  "path_id": 1,
-  "frame": "world",
-  "target_speed": 0.2,
-  "points": [[0.0, 0.0], [0.4, 0.0], [0.6, 0.2], [0.9, 0.2]]
-}

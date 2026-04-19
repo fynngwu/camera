@@ -1,108 +1,121 @@
-"""Ground robot endpoint: connect to the GCS server and print commands."""
+"""Ground robot endpoint: background thread reads cmd_vel from GCS, main loop uses it."""
 from __future__ import annotations
 
 import argparse
 import json
-import logging
 import socket
+import threading
 import time
-from typing import Any, Dict
-
-from common.protocol import decode_message
-
-LOGGER = logging.getLogger(__name__)
+import tomllib
 
 
-DEFAULT_CONFIG = {
-    "gcs_host": "127.0.0.1",
-    "gcs_port": 47001,
-    "reconnect_sec": 1.0,
-}
+class CommandReader:
+    """Background thread that reads cmd_vel messages from GCS.
 
+    Usage:
+        reader = CommandReader(host, port)
+        reader.start()
+        # ... main loop ...
+        #   vx, vy, wz = reader.last_cmd
+        #   reader.stop()
+    """
 
-class GroundRobotReceiver:
-    """TCP client that receives `cmd_vel` and `reach_goal` messages."""
+    def __init__(self, host: str = "127.0.0.1", port: int = 47001) -> None:
+        self.host = host
+        self.port = port
+        self.last_cmd: tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self.goal_reached = False
+        self._sock: socket.socket | None = None
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
 
-    def __init__(self, config: Dict[str, Any]) -> None:
-        self.config = {**DEFAULT_CONFIG, **config}
+    def start(self) -> None:
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
 
-    def run_forever(self) -> None:
-        """Keep reconnecting to the GCS server and process incoming commands."""
-        host = str(self.config.get("gcs_host", self.config.get("sky_host", "127.0.0.1")))
-        port = int(self.config.get("gcs_port", self.config.get("sky_port", 47001)))
-        reconnect = max(0.2, float(self.config.get("reconnect_sec", 1.0)))
-        while True:
+    def stop(self) -> None:
+        self._stop.set()
+        if self._sock:
+            self._sock.close()
+        if self._thread:
+            self._thread.join(timeout=2.0)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
             try:
-                LOGGER.info("connecting to gcs %s:%s", host, port)
-                with socket.create_connection((host, port), timeout=3.0) as sock:
-                    sock.settimeout(1.0)
-                    LOGGER.info("connected to gcs %s:%s", host, port)
-                    self._read_loop(sock)
-            except KeyboardInterrupt:
-                raise
-            except Exception as exc:
-                LOGGER.warning("connection failed/disconnected: %s", exc)
-                time.sleep(reconnect)
+                print(f"connecting to {self.host}:{self.port}", flush=True)
+                self._sock = socket.create_connection((self.host, self.port))
+                print(f"connected to {self.host}:{self.port}", flush=True)
+                self._read_loop()
+                if self.goal_reached:
+                    return
+            except Exception:
+                pass
+            finally:
+                if self._sock:
+                    self._sock.close()
+                    self._sock = None
+                self._stop.wait(1.0)
 
-    def _read_loop(self, sock: socket.socket) -> None:
-        buffer = b""
-        while True:
-            chunk = sock.recv(65536)
+    def _read_loop(self) -> None:
+        buf = b""
+        while not self._stop.is_set():
+            chunk = self._sock.recv(65536)
             if not chunk:
                 return
-            buffer += chunk
-            while b"\n" in buffer:
-                line, buffer = buffer.split(b"\n", 1)
-                if not line.strip():
-                    continue
-                self._handle_line(line)
-
-    def _handle_line(self, line: bytes) -> None:
-        try:
-            message = decode_message(line)
-            if message.get("type") == "cmd_vel":
-                print(
-                    f"[{time.strftime('%H:%M:%S')}] cmd_vel "
-                    f"vx={float(message['vx']):.3f} "
-                    f"vy={float(message['vy']):.3f} "
-                    f"wz={float(message['wz']):.3f}",
-                    flush=True,
-                )
-                return
-            if message.get("type") == "reach_goal":
-                print(f"[{time.strftime('%H:%M:%S')}] reach_goal", flush=True)
-                return
-            raise ValueError(f"unsupported type: {message.get('type')}")
-        except Exception as exc:
-            LOGGER.warning("invalid message: %s", exc)
-
-
-def parse_args() -> argparse.Namespace:
-    """Parse CLI args."""
-    parser = argparse.ArgumentParser(description="Ground robot receiver")
-    parser.add_argument("--config", default="config/ground_robot.json", help="Path to ground_robot config JSON")
-    parser.add_argument("--log-level", default="INFO", help="Python logging level")
-    return parser.parse_args()
-
-
-def load_config(path: str) -> Dict[str, Any]:
-    """Load JSON config if it exists."""
-    try:
-        with open(path, "r", encoding="utf-8") as fp:
-            return json.load(fp)
-    except FileNotFoundError:
-        LOGGER.warning("config not found, using defaults: %s", path)
-        return {}
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                msg = json.loads(line)
+                if msg["type"] == "cmd_vel":
+                    self.last_cmd = (float(msg["vx"]), float(msg["vy"]), float(msg["wz"]))
+                elif msg["type"] == "reach_goal":
+                    self.goal_reached = True
+                    return
 
 
 def main() -> None:
-    """Program entry."""
-    args = parse_args()
-    logging.basicConfig(
-        level=getattr(logging, str(args.log_level).upper(), logging.INFO),
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    )
-    GroundRobotReceiver(load_config(args.config)).run_forever()
+    parser = argparse.ArgumentParser(description="Ground robot receiver")
+    parser.add_argument("--config", default="config/ground_station.toml")
+    parser.add_argument("--host", default=None)
+    parser.add_argument("--port", type=int, default=None)
+    args = parser.parse_args()
+
+    with open(args.config, "rb") as f:
+        cfg = tomllib.load(f)
+
+    host = args.host or cfg.get("server", {}).get("host", "127.0.0.1")
+    port = args.port or cfg.get("server", {}).get("port", 47001)
+
+    reader = CommandReader(host, port)
+    reader.start()
+
+    state = "idle"
+    try:
+        while True:
+            if state == "idle":
+                vx, vy, wz = reader.last_cmd
+                if vx != 0.0 or vy != 0.0 or wz != 0.0:
+                    state = "running"
+                    print(f"[{time.strftime('%H:%M:%S')}] >> running", flush=True)
+            elif state == "running":
+                vx, vy, wz = reader.last_cmd
+                print(
+                    f"[{time.strftime('%H:%M:%S')}] cmd_vel "
+                    f"vx={vx:.3f} vy={vy:.3f} wz={wz:.3f}",
+                    flush=True,
+                )
+                if reader.goal_reached:
+                    state = "done"
+                    reader.stop()
+                    print(f"[{time.strftime('%H:%M:%S')}] >> done", flush=True)
+            elif state == "done":
+                break
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        pass
+    reader.stop()
 
 
 if __name__ == "__main__":

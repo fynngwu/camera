@@ -39,3 +39,4 @@ calibration_data/
 
 # Memory files
 *.jsonl
+uv.lock

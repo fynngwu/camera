@@ -50,6 +50,7 @@ class SkyTcpConnector:
         self._cmd_seq = 1
         self._telemetry_seq = 1
         self._threads: list[threading.Thread] = []
+        self._last_robot_warn_ts = 0.0
 
     def run_forever(self) -> None:
         """Start connector threads and block until interrupted."""
@@ -235,13 +236,22 @@ class SkyTcpConnector:
         with self._robot_lock:
             conn = self._robot_conn
         if conn is None:
+            self._warn_robot_unavailable()
             return False
         try:
             conn.sendall(encode_message(message))
             return True
         except Exception:
             self._set_robot_conn(None)
+            self._warn_robot_unavailable()
             return False
+
+    def _warn_robot_unavailable(self) -> None:
+        now = time.monotonic()
+        if now - self._last_robot_warn_ts < 2.0:
+            return
+        self._last_robot_warn_ts = now
+        LOGGER.warning("ground_robot is not connected; cmd_vel dropped")
 
     def _set_gcs_conn(self, conn: Optional[socket.socket]) -> None:
         with self._gcs_lock:

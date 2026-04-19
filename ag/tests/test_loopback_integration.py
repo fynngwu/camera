@@ -98,6 +98,15 @@ class RobotStub:
 class LoopbackIntegrationTests(unittest.TestCase):
     """Verify end-to-end command + telemetry flow on localhost."""
 
+    def test_warns_when_robot_not_connected(self) -> None:
+        connector = SkyTcpConnector({"controller": {}})
+
+        with self.assertLogs("sky_uav.tcp_connector", level="WARNING") as captured:
+            sent = connector._send_robot(make_message("cmd_vel", seq=1, vx=0.1, vy=0.0, wz=0.0))
+
+        self.assertFalse(sent)
+        self.assertTrue(any("ground_robot is not connected" in line for line in captured.output))
+
     def test_path_to_cmd_and_telemetry(self) -> None:
         gcs_port = _free_port()
         robot_port = _free_port()

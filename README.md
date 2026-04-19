@@ -2,25 +2,53 @@
 
 相机工具集，包含 RTSP 远程视频流传输、相机标定和 AprilTag BEV 投影功能。
 
-## 相机启动
+## 快速获取相机画面（推荐）
 
-1. 将相机通过 USB 连接到树莓派，按下相机上的按钮切换到 **PC 模式**
-2. SSH 登录树莓派并启动 RTSP 服务器：
-   ```bash
-   ssh wufy@10.28.215.179
-   python3 rtsp_server.py
-   ```
-3. 在本机查看相机画面：
-   ```bash
-   python3 scripts/simple_rtsp_viewer.py --url rtsp://10.28.215.179:8554/video
-   ```
+本方案使用 **MediaMTX + FFmpeg** 推流、**OpenCV FFmpeg 后端** 拉流，不依赖 GStreamer。
+
+### 技术栈
+
+| 环节 | 技术 | 说明 |
+|------|------|------|
+| RTSP 服务器 | [MediaMTX](https://github.com/bluenviron/mediamtx) | 轻量、零配置 RTSP/RTMP/HLS 服务 |
+| 推流 | FFmpeg (`v4l2` → `copy` → RTSP) | 从 USB 相机直读 H.264，零转码推流 |
+| 拉流 | OpenCV `CAP_FFMPEG` + UDP | 后台线程 grab/retrieve，零缓冲最低延迟 |
+| 传输协议 | RTSP over UDP | 比 TCP 延迟更低 |
+
+### 步骤
+
+**1. 远端：启动推流**
+
+将相机通过 USB 连接到远端设备（如树莓派），按下相机按钮切换到 **PC 模式**（视频模式），然后 SSH 登录启动推流脚本：
+
+```bash
+ssh wufy@100.103.8.66
+tmux new -s cam
+./start_rtsp_push.sh
+```
+
+> 也可以直接 `ssh wufy@100.103.8.66 ./start_rtsp_push.sh`，但推荐 tmux 以便后台运行。
+>
+> **重要**：启动脚本前必须先切换相机到正确的硬件模式（PC 模式），否则 FFmpeg 会报错无法打开 `/dev/video0`。
+
+**2. 本机：拉流查看**
+
+```bash
+uv sync          # 首次运行，安装依赖（含 opencv-python）
+uv run python rtsp_pull_test.py
+```
+
+按 `ESC` 退出。
+
+### 自定义 RTSP 地址
+
+编辑 `rtsp_pull_test.py` 中的 `url` 变量，或修改后直接运行。默认地址为 `rtsp://100.103.8.66:8554/cam`。
 
 ## 功能特性
 
-- **RTSP 视频流**：基于 GStreamer 的远程摄像头图像实时传输
+- **RTSP 视频流**：MediaMTX + FFmpeg 推流，OpenCV FFmpeg 后端拉流
 - **相机标定**：完整的相机标定工具链，支持棋盘格图案标定和畸变校正
 - **AprilTag BEV**：实时的 AprilTag 检测和 BEV（鸟瞰图）投影
-- **Qt 前端查看器**：高性能 PySide6 相机查看器，支持 RTSP 和 USB
 
 ## 项目结构
 
@@ -28,15 +56,9 @@
 camera/
 ├── README.md                   # 本文件
 ├── pyproject.toml              # 项目配置
-├── scripts/                    # 可执行脚本
-│   ├── rtsp_server.py         # RTSP 服务器
-│   ├── rtsp_manager.sh        # RTSP 管理工具
-│   ├── simple_rtsp_viewer.py  # 简洁版 RTSP 查看器
-│   └── view_rtsp_stream.py    # 完整版 RTSP 查看器（带性能测试）
-├── frontend/                   # Qt 前端应用
-│   ├── main.py                # 主入口
-│   ├── view/                  # UI组件
-│   └── server/                # 后端线程
+├── start_rtsp_push.sh          # 远端推流脚本（MediaMTX + FFmpeg）
+├── rtsp_pull_test.py           # 本机拉流脚本（OpenCV FFmpeg 后端）
+├── scripts/                    # 辅助脚本
 ├── src/                        # 源代码
 │   └── camera_cal/            # 相机标定模块
 ├── calibration_data/           # 标定数据
@@ -50,151 +72,18 @@ camera/
 
 - Python 3.10+
 - `uv`
-- 系统自带 OpenCV，且必须支持 GStreamer
-
-```bash
-sudo apt install -y v4l-utils gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav python3-opencv gir1.2-gst-rtsp-server-1.0
-```
-
-**重要**：本项目不通过 `pip` 安装 `opencv-python`。pip 版本的 OpenCV 通常没有 GStreamer 支持。
-
-验证系统 OpenCV：
-
-```bash
-python3 - <<'PY'
-import cv2
-print(cv2.__file__)
-print(cv2.__version__)
-print('GStreamer: YES' in cv2.getBuildInformation())
-PY
-```
 
 ## 安装
 
 ```bash
-cd /home/wufy/learning/camera
-
-# 创建虚拟环境，自动使用系统Python版本并继承系统包（关键：获得GStreamer支持的OpenCV）
-uv venv --python $(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')") --system-site-packages
 uv sync
 ```
 
-**关键参数**：
-- `--python $(...)`：动态读取系统Python版本，确保一致
-- `--system-site-packages`：让 `.venv` 复用系统已安装的 OpenCV，保留 GStreamer 支持
+> `opencv-python` 已作为项目依赖，无需手动配置系统包或 GStreamer。
 
 ---
 
-## 1. RTSP 视频流
-
-远程摄像头图像实时传输，支持多种分辨率和帧率配置。
-
-### 快速启动
-
-```bash
-# 启动 RTSP 服务器 - 最高分辨率 1080p30（推荐）
-/usr/bin/python3 scripts/rtsp_server.py
-
-# 或手动指定最高分辨率
-/usr/bin/python3 scripts/rtsp_server.py --width 1920 --height 1080 --fps 30
-
-# 启动查看器（在另一台机器上）
-/usr/bin/python3 scripts/simple_rtsp_viewer.py --url rtsp://127.0.0.1:8554/video
-```
-
-> **注意**：必须使用 `/usr/bin/python3`（系统 Python），因为需要 `gi` 模块（GStreamer RTSP Server）。项目 `.venv` 中没有此模块。
-
-### 配置分辨率和帧率
-
-```bash
-# 启动 720p60 服务器
-./scripts/rtsp_manager.sh start -w 1280 -H 720 -f 60
-
-# 启动 VGA 30fps 服务器
-./scripts/rtsp_manager.sh start -w 640 -H 480 -f 30
-```
-
-### 管理脚本命令
-
-```bash
-# 启动/停止/重启
-./scripts/rtsp_manager.sh start|stop|restart [options]
-
-# 查看状态/日志
-./scripts/rtsp_manager.sh status
-./scripts/rtsp_manager.sh log
-
-# 启动查看器（带统计信息）
-./scripts/rtsp_manager.sh view --stats
-
-# 运行性能测试
-./scripts/rtsp_manager.sh test
-```
-
-### Python 查看器
-
-**简洁版查看器**（易于复用）：
-
-```bash
-# 默认连接
-python3 scripts/simple_rtsp_viewer.py
-
-# 自定义 RTSP 地址
-python3 scripts/simple_rtsp_viewer.py --url rtsp://your-ip:8554/video
-```
-
-**在代码中复用**：
-
-```python
-from simple_rtsp_viewer import view_rtsp
-
-# 直接调用
-view_rtsp('rtsp://100.103.8.66:8554/video')
-
-# 自定义窗口名称
-view_rtsp('rtsp://100.103.8.66:8554/video', window_name='My Camera')
-```
-
-### 性能测试
-
-```bash
-# 自动测试多种配置并生成报告
-./scripts/rtsp_manager.sh test
-```
-
-测试结果将保存到 `docs/benchmark_results.md`，包含各种分辨率和帧率配置的 FPS 统计。
-
-### 配置远程主机
-
-编辑 `scripts/rtsp_manager.sh`：
-
-```bash
-REMOTE_HOST="你的 IP 地址"
-REMOTE_USER="你的用户名"
-```
-
-### 技术规格
-
-| 参数 | 值 |
-|------|------|
-| RTSP URL | `rtsp://<服务器IP>:8554/video` |
-| 视频编码 | H.264 (摄像头原生输出) |
-| 最高分辨率 | 1920x1080 @ 30fps |
-| 传输协议 | RTSP over TCP |
-| 延迟 | < 200ms |
-
-**摄像头支持的分辨率 (H.264)**：
-
-| 分辨率 | 帧率 |
-|--------|------|
-| 1920x1080 | 30fps |
-| 1280x720 | 30fps |
-| 640x480 | 30fps |
-| 320x240 | 30fps |
-
----
-
-## 2. 相机标定
+## 1. 相机标定
 
 使用棋盘格图案进行相机标定，获得相机内参和畸变系数。新的交互式标定工具经过性能优化，CPU 使用率降低 70%+，体验更流畅。
 
@@ -312,7 +201,7 @@ class CalibrationConfig:
 
 ---
 
-## 3. AprilTag BEV 投影
+## 2. AprilTag BEV 投影
 
 实时的 AprilTag 检测和 BEV（鸟瞰图）投影，窗口左侧显示去畸变后的检测结果，右侧显示 BEV 结果。
 
@@ -339,7 +228,6 @@ uv run bev --image tag36h11_0.png
 
 ```bash
 uv run bev \
-  --gst "rtspsrc location=rtsp://<ip>:8554/video latency=0 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! appsink drop=true max-buffers=1 sync=false" \
   --target-id 0 \
   --quad-decimate 1.5 \
   --threads 4 \
@@ -348,7 +236,6 @@ uv run bev \
 
 **参数说明：**
 - `--image`: 单张图片调试模式；不传时走 RTSP
-- `--gst`: 自定义 GStreamer pipeline
 - `--calibration`: 标定文件路径
 - `--target-id`: 跟踪的 tag id，默认 `0`
 - `--quad-decimate`: 检测降采样倍率。越大越快，但越容易漏检
@@ -376,97 +263,22 @@ uv run python generate_apriltag.py
 
 ---
 
-## 4. Qt 前端相机查看器
-
-基于 PySide6 的高性能相机查看器，支持 RTSP 流和 USB 相机。
-
-### 目录结构
-
-```
-frontend/
-├── main.py                  # 主入口
-├── view/                    # UI组件
-│   ├── main_window.py      # 主窗口
-│   └── camera_widget.py    # 相机显示控件
-└── server/                  # 后端线程
-    ├── frame_buffer.py     # 线程安全帧缓冲
-    └── camera_worker.py    # 相机读取QThread
-```
-
-### 快速启动
-
-```bash
-# 默认连接 RTSP 流
-source .venv/bin/activate && python -m frontend.main
-
-# 连接本地 RTSP 服务器
-source .venv/bin/activate && python -m frontend.main --rtsp rtsp://127.0.0.1:8554/video
-
-# 使用 USB 相机
-source .venv/bin/activate && python -m frontend.main --usb 0
-
-# 全屏模式
-source .venv/bin/activate && python -m frontend.main --fullscreen
-```
-
-### 功能特性
-
-- 低延迟 GStreamer RTSP 流（`latency=0`, `drop=true`）
-- 后台线程帧捕获，不阻塞 GUI
-- 实时 FPS 显示
-- 连接/断开控制
-- 刷新率可调节
-
-### 命令行参数
-
-| 参数 | 说明 |
-|------|------|
-| `--rtsp <url>` | RTSP 流地址 |
-| `--usb <id>` | USB 相机设备 ID |
-| `--fullscreen` | 全屏模式 |
-| `--width <n>` | 窗口宽度（默认 1600） |
-| `--height <n>` | 窗口高度（默认 900） |
-
----
-
 ## 故障排查
 
 ### RTSP 无法连接
 
 ```bash
-# 1. 检查 SSH 连接
-ssh wufy@100.103.8.66
+# 1. 检查远端推流是否在运行
+ssh wufy@100.103.8.66 "ps aux | grep -E 'mediamtx|ffmpeg'"
 
-# 2. 检查 RTSP 服务器状态
-./scripts/rtsp_manager.sh status
-
-# 3. 检查端口连通性
+# 2. 检查端口连通性
 timeout 2 bash -c "echo > /dev/tcp/100.103.8.66/8554"
-
-# 4. 查看服务器日志
-./scripts/rtsp_manager.sh log
-```
-
-### OpenCV GStreamer 问题
-
-如果脚本提示无法打开 RTSP 流，但 `gst-launch-1.0` 可以正常拉流：
-
-```bash
-# 删除 pip 安装的 OpenCV
-python3 -m pip uninstall -y opencv-python opencv-python-headless numpy
-
-# 确保系统包已安装
-sudo apt-get install -y python3-opencv python3-numpy
 ```
 
 ### 摄像头被占用
 
 ```bash
-# 在远程主机检查谁在使用摄像头
 ssh wufy@100.103.8.66 "lsof /dev/video0"
-
-# 重启 RTSP 服务器
-./scripts/rtsp_manager.sh restart
 ```
 
 ---
@@ -474,7 +286,6 @@ ssh wufy@100.103.8.66 "lsof /dev/video0"
 ## 文档
 
 - [V4L2 命令](docs/V4L2_COMMANDS.md) - 相机参数检查和配置
-- [GStreamer 网络流](docs/GSTREAMER_NETWORK_STREAMING.md) - 网络视频流详细设置
 
 ## License
 

@@ -6,7 +6,7 @@ os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
     "rtsp_transport;udp|max_delay;0|fflags;nobuffer|flags;low_delay"
 )
 
-url = "rtsp://100.103.8.66:8554/cam"
+url = "rtsp://10.28.215.179:8554/cam"
 
 cap = cv2.VideoCapture(
     url,

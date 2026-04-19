@@ -357,7 +357,6 @@ class MainWindow(QMainWindow):
         bev_cfg = BevConfig(**config.get("bev", {}))
         self.bev_backend = BevBackend(
             rtsp_url=str(config.get("rtsp_url")),
-            rtsp_pipeline=str(config.get("rtsp_pipeline", "")),
             fps_limit=float(config.get("video_fps_limit", 20.0)),
             process_every_n=int(config.get("bev_process_every_n", 2)),
             bev_config=bev_cfg,

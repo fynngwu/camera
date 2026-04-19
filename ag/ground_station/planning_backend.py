@@ -72,52 +72,67 @@ class AStarPlanner:
     def plan(self, start: WorldPoint, goals: Sequence[WorldPoint], obstacles: Sequence[ObstacleRect]) -> List[WorldPoint]:
         if not goals:
             return [start]
+        if self._point_inside_obstacle(start, obstacles):
+            raise ValueError("start point is inside obstacle")
         occupancy = self._build_occupancy(obstacles)
         total_path: List[WorldPoint] = [start]
         current = start
         for goal in goals:
+            if self._point_inside_obstacle(goal, obstacles):
+                raise ValueError("goal point is inside obstacle")
             segment = self._plan_segment(current, goal, occupancy)
-            if len(segment) <= 1:
-                total_path.append(goal)
-            else:
+            if total_path[-1] == segment[0]:
                 total_path.extend(segment[1:])
+            else:
+                total_path.extend(segment)
             current = goal
-        return self._simplify(total_path)
+        return total_path
 
     def _plan_segment(self, start: WorldPoint, goal: WorldPoint, occupancy: List[List[bool]]) -> List[WorldPoint]:
         s = self._world_to_grid(*start)
         g = self._world_to_grid(*goal)
-        if self._is_blocked(s, occupancy):
+        search_start = self._nearest_free_cell(s, occupancy)
+        search_goal = self._nearest_free_cell(g, occupancy)
+        if search_start is None:
             raise ValueError("start cell is blocked")
-        if self._is_blocked(g, occupancy):
+        if search_goal is None:
             raise ValueError("goal cell is blocked")
+        if self._line_of_sight(search_start, search_goal, occupancy):
+            return [start, goal]
 
-        frontier: List[Tuple[float, Tuple[int, int]]] = [(0.0, s)]
-        came_from: Dict[Tuple[int, int], Optional[Tuple[int, int]]] = {s: None}
-        cost_so_far: Dict[Tuple[int, int], float] = {s: 0.0}
+        start_h = self._heuristic(search_start, search_goal)
+        frontier: List[Tuple[float, float, float, Tuple[int, int]]] = [(start_h, 0.0, start_h, search_start)]
+        came_from: Dict[Tuple[int, int], Optional[Tuple[int, int]]] = {search_start: None}
+        cost_so_far: Dict[Tuple[int, int], float] = {search_start: 0.0}
 
         while frontier:
-            _, current = heapq.heappop(frontier)
-            if current == g:
+            _, _, _, current = heapq.heappop(frontier)
+            if current == search_goal:
                 break
             for nxt, step_cost in self._neighbors(current, occupancy):
                 new_cost = cost_so_far[current] + step_cost
                 if nxt not in cost_so_far or new_cost < cost_so_far[nxt]:
                     cost_so_far[nxt] = new_cost
-                    priority = new_cost + self._heuristic(nxt, g)
-                    heapq.heappush(frontier, (priority, nxt))
+                    h = self._heuristic(nxt, search_goal)
+                    line_bias = self._line_deviation(nxt, search_start, search_goal)
+                    priority = new_cost + h + 1e-3 * line_bias
+                    heapq.heappush(frontier, (priority, line_bias, h, nxt))
                     came_from[nxt] = current
 
-        if g not in came_from:
+        if search_goal not in came_from:
             raise ValueError("planner failed to find path")
 
         path_grid: List[Tuple[int, int]] = []
-        cur: Optional[Tuple[int, int]] = g
+        cur: Optional[Tuple[int, int]] = search_goal
         while cur is not None:
             path_grid.append(cur)
             cur = came_from[cur]
         path_grid.reverse()
-        return [self._grid_to_world(ix, iy) for ix, iy in path_grid]
+        path_world: List[WorldPoint] = [start]
+        for ix, iy in path_grid[1:-1]:
+            path_world.append(self._grid_to_world(ix, iy))
+        path_world.append(goal)
+        return self._shortcut(path_world, occupancy)
 
     def _build_occupancy(self, obstacles: Sequence[ObstacleRect]) -> List[List[bool]]:
         grid = [[False for _ in range(self.width)] for _ in range(self.height)]
@@ -157,7 +172,85 @@ class AStarPlanner:
 
     @staticmethod
     def _heuristic(a: Tuple[int, int], b: Tuple[int, int]) -> float:
-        return math.hypot(a[0] - b[0], a[1] - b[1])
+        dx = abs(a[0] - b[0])
+        dy = abs(a[1] - b[1])
+        diagonal = min(dx, dy)
+        straight = max(dx, dy) - diagonal
+        return straight + math.sqrt(2.0) * diagonal
+
+    @staticmethod
+    def _line_deviation(node: Tuple[int, int], start: Tuple[int, int], goal: Tuple[int, int]) -> float:
+        vx = goal[0] - start[0]
+        vy = goal[1] - start[1]
+        if vx == 0 and vy == 0:
+            return 0.0
+        wx = node[0] - start[0]
+        wy = node[1] - start[1]
+        return abs(vx * wy - vy * wx) / math.hypot(vx, vy)
+
+    def _line_of_sight(self, start: Tuple[int, int], goal: Tuple[int, int], occupancy: List[List[bool]]) -> bool:
+        x0, y0 = start
+        x1, y1 = goal
+        dx = x1 - x0
+        dy = y1 - y0
+        steps = max(abs(dx), abs(dy))
+        if steps == 0:
+            return not self._is_blocked(start, occupancy)
+        for i in range(steps + 1):
+            t = i / steps
+            ix = int(round(x0 + dx * t))
+            iy = int(round(y0 + dy * t))
+            ix = max(0, min(self.width - 1, ix))
+            iy = max(0, min(self.height - 1, iy))
+            if occupancy[iy][ix]:
+                return False
+        return True
+
+    def _point_inside_obstacle(self, point: WorldPoint, obstacles: Sequence[ObstacleRect]) -> bool:
+        px, py = point
+        inflate = float(self.config.robot_radius_m)
+        for obstacle in obstacles:
+            rect = obstacle.normalized()
+            if rect.x_min - inflate <= px <= rect.x_max + inflate and rect.y_min - inflate <= py <= rect.y_max + inflate:
+                return True
+        return False
+
+    def _nearest_free_cell(self, node: Tuple[int, int], occupancy: List[List[bool]]) -> Optional[Tuple[int, int]]:
+        if not self._is_blocked(node, occupancy):
+            return node
+        max_radius = max(self.width, self.height)
+        for radius in range(1, max_radius):
+            for dy in range(-radius, radius + 1):
+                for dx in range(-radius, radius + 1):
+                    if max(abs(dx), abs(dy)) != radius:
+                        continue
+                    nx = node[0] + dx
+                    ny = node[1] + dy
+                    if not (0 <= nx < self.width and 0 <= ny < self.height):
+                        continue
+                    if not occupancy[ny][nx]:
+                        return (nx, ny)
+        return None
+
+    def _shortcut(self, points: Sequence[WorldPoint], occupancy: List[List[bool]]) -> List[WorldPoint]:
+        path = list(points)
+        if len(path) <= 2:
+            return path
+        compact_path = [path[0]]
+        start_idx = 0
+        while start_idx < len(path) - 1:
+            end_idx = len(path) - 1
+            while end_idx > start_idx + 1:
+                if self._line_of_sight(
+                    self._world_to_grid(*path[start_idx]),
+                    self._world_to_grid(*path[end_idx]),
+                    occupancy,
+                ):
+                    break
+                end_idx -= 1
+            compact_path.append(path[end_idx])
+            start_idx = end_idx
+        return compact_path
 
     @staticmethod
     def _is_blocked(node: Tuple[int, int], occupancy: List[List[bool]]) -> bool:
@@ -360,8 +453,7 @@ DEFAULT_STATION_CONFIG: Dict[str, Any] = {
     "sky_port": 46001,
     "reconnect_interval_sec": 1.0,
     "target_speed": 0.2,
-    "rtsp_url": "rtsp://127.0.0.1:8554/video",
-    "rtsp_pipeline": "",
+    "rtsp_url": "rtsp://10.28.215.179:8554/cam",
     "video_fps_limit": 20.0,
     "bev_process_every_n": 2,
     "map": {

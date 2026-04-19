@@ -166,12 +166,11 @@ class AprilTagBevProcessor:
 
 
 class BevBackend:
-    """RTSP reader backend with periodic BEV processing callbacks."""
+    """RTSP reader backend (FFmpeg low-latency) with periodic BEV processing callbacks."""
 
     def __init__(
         self,
         rtsp_url: str,
-        rtsp_pipeline: str,
         fps_limit: float,
         process_every_n: int,
         bev_config: BevConfig,
@@ -181,7 +180,6 @@ class BevBackend:
         on_log: Optional[LogCallback] = None,
     ) -> None:
         self.rtsp_url = str(rtsp_url)
-        self.rtsp_pipeline = str(rtsp_pipeline)
         self.fps_limit = float(fps_limit)
         self.process_every_n = max(1, int(process_every_n))
         self.processor = AprilTagBevProcessor(bev_config)
@@ -208,24 +206,50 @@ class BevBackend:
             self._thread.join(timeout=1.5)
 
     def _run(self) -> None:
-        source = self.rtsp_pipeline.strip() or self._build_pipeline(self.rtsp_url)
-        cap = cv2.VideoCapture(source, cv2.CAP_GSTREAMER)
-        if not cap.isOpened():
-            cap = cv2.VideoCapture(self.rtsp_url)
+        # Configure FFmpeg for low-latency RTSP over UDP
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+            "rtsp_transport;udp|max_delay;0|fflags;nobuffer|flags;low_delay"
+        )
+        cap = cv2.VideoCapture(
+            self.rtsp_url,
+            cv2.CAP_FFMPEG,
+            [
+                cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 3000,
+                cv2.CAP_PROP_READ_TIMEOUT_MSEC, 1000,
+                cv2.CAP_PROP_N_THREADS, 1,
+            ],
+        )
         if not cap.isOpened():
             self._log("ERROR", f"failed to open rtsp source: {self.rtsp_url}")
             return
-        self._log("INFO", f"rtsp opened: {self.rtsp_url}")
+        self._log("INFO", f"rtsp opened (ffmpeg): {self.rtsp_url}")
+
+        # Background reader thread keeps grabbing latest frames
+        latest: dict = {"frame": None}
+        lock = threading.Lock()
+
+        def _reader() -> None:
+            while not self._stop_event.is_set():
+                if not cap.grab():
+                    continue
+                ok, frame = cap.retrieve()
+                if not ok:
+                    continue
+                with lock:
+                    latest["frame"] = frame
+
+        reader_thread = threading.Thread(target=_reader, daemon=True)
+        reader_thread.start()
 
         frame_idx = 0
         target_period = 1.0 / max(1.0, self.fps_limit)
         try:
             while not self._stop_event.is_set():
                 tick = time.perf_counter()
-                ok, frame = cap.read()
-                if not ok:
-                    self._log("WARN", "rtsp read failed")
-                    time.sleep(0.05)
+                with lock:
+                    frame = None if latest["frame"] is None else latest["frame"].copy()
+                if frame is None:
+                    time.sleep(0.01)
                     continue
 
                 raw, bev, meta = self.processor.process(frame)
@@ -250,11 +274,3 @@ class BevBackend:
     def _log(self, level: str, text: str) -> None:
         if self.on_log is not None:
             self.on_log(level, text)
-
-    @staticmethod
-    def _build_pipeline(url: str) -> str:
-        return (
-            f"rtspsrc location={url} latency=0 ! "
-            "rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! "
-            "appsink drop=true max-buffers=1 sync=false"
-        )

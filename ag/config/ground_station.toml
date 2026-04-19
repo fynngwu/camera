@@ -30,5 +30,5 @@ max_wz = 0.80
 enabled = true
 calibration_path = "config/calibration.yaml"
 target_id = 0
-tag_size = 0.09
+tag_size = 0.44
 aruco_dict = "DICT_4X4_50"

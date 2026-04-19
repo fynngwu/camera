@@ -33,6 +33,7 @@ try:
         QMessageBox,
         QPushButton,
         QPlainTextEdit,
+        QSizePolicy,
         QSplitter,
         QVBoxLayout,
         QWidget,
@@ -49,6 +50,7 @@ except ImportError:  # pragma: no cover
         QMessageBox,
         QPushButton,
         QPlainTextEdit,
+        QSizePolicy,
         QSplitter,
         QVBoxLayout,
         QWidget,
@@ -125,16 +127,22 @@ class MapCanvas(QWidget):
     goal, planned path, robot pose, and command arrow.
     """
 
+    # Right-click tool cycle: LINE -> GOAL -> (plan) -> (execute)
+    _TOOL_CYCLE = [ToolMode.DRAW_LINE, ToolMode.SET_GOAL]
+
     def __init__(self, mapper: GridMapper) -> None:
         super().__init__()
         self.mapper = mapper
         self.editor = MapEditor()
+        self.editor.set_tool(ToolMode.DRAW_LINE)
         self.pose: Optional[Pose2D] = None
         self.cmd = VelocityCommand(v_x=0.0, v_y=0.0, w_z=0.0, timestamp=0.0)
         self.current_path: list[WorldPoint] = []
         self.occupancy: list[list[bool]] | None = None
         self._background: Optional[QImage] = None
         self._mouse_world: Optional[WorldPoint] = None
+        self._tool_cycle_idx: int = 0
+        self.on_tool_cycle: Optional[callable] = None
         self.setMinimumSize(420, 320)
         self.setMouseTracking(True)
 
@@ -163,11 +171,19 @@ class MapCanvas(QWidget):
     # --- Qt events --------------------------------------------------------
 
     def paintEvent(self, event) -> None:  # noqa: N802
+        try:
+            self._do_paint(event)
+        except Exception as exc:
+            print(f"[paintEvent ERROR] {exc}", flush=True)
+            import traceback
+            traceback.print_exc()
+
+    def _do_paint(self, event) -> None:
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(24, 24, 24))
-        draw_rect = self.rect().adjusted(8, 8, -8, -8)
+        draw_rect = QRectF(self.rect().adjusted(8, 8, -8, -8))
         if self._background is not None:
-            scaled = self._background.scaled(draw_rect.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            scaled = self._background.scaled(draw_rect.size().toSize(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
             painter.drawImage(draw_rect, scaled)
         self._draw_occupancy(painter, draw_rect)
         self._draw_obstacles(painter, draw_rect)
@@ -187,6 +203,7 @@ class MapCanvas(QWidget):
             self.editor.left_click(world)
         elif event.button() == Qt.RightButton:
             self.editor.right_click(world)
+            self._cycle_tool()
         self.update()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
@@ -207,7 +224,7 @@ class MapCanvas(QWidget):
         for iy in range(h):
             for ix in range(w):
                 if self.occupancy[iy][ix]:
-                    img.setPixelColor(ix, iy, QColor(255, 80, 80, 50))
+                    img.setPixelColor(ix, h - 1 - iy, QColor(255, 80, 80, 50))
         scaled = img.scaled(draw_rect.size().toSize(), Qt.IgnoreAspectRatio, Qt.FastTransformation)
         painter.drawImage(draw_rect, scaled)
 
@@ -257,6 +274,9 @@ class MapCanvas(QWidget):
             if prev is not None:
                 painter.drawLine(prev, p)
             prev = p
+        if prev is not None:
+            painter.setPen(QColor(255, 220, 0))
+            painter.drawText(prev + QPointF(6, -6), f"path({len(self.current_path)})")
 
     def _draw_pose(self, painter: QPainter, draw_rect: QRectF) -> None:
         if self.pose is None:
@@ -299,14 +319,39 @@ class MapCanvas(QWidget):
                 painter.setPen(QPen(QColor(255, 180, 180), 2, Qt.DashLine))
                 painter.setBrush(QBrush(QColor(255, 180, 180, 40)))
                 painter.drawRect(QRectF(p0, p1).normalized())
-        elif self.editor.tool == ToolMode.DRAW_LINE and self.editor._active_line is not None:
-            if self.editor._active_line.points:
+        elif self.editor.tool == ToolMode.DRAW_LINE:
+            if self.editor._active_line is not None and self.editor._active_line.points:
                 last = self.editor._active_line.points[-1]
                 p0 = self._world_to_widget(last[0], last[1], draw_rect)
+            elif self.editor._active_line is None and self.editor._pending_line_start is not None:
+                p0 = self._world_to_widget(self.editor._pending_line_start[0], self.editor._pending_line_start[1], draw_rect)
+            else:
+                p0 = None
+            if p0 is not None:
                 p1 = self._world_to_widget(self._mouse_world[0], self._mouse_world[1], draw_rect)
-                if p0 and p1:
+                if p1:
                     painter.setPen(QPen(QColor(255, 180, 180), 2, Qt.DashLine))
                     painter.drawLine(p0, p1)
+
+    def _cycle_tool(self) -> None:
+        """Right-click advances: LINE -> SET_GOAL -> plan callback -> execute callback."""
+        idx = self._tool_cycle_idx
+        if idx < len(self._TOOL_CYCLE):
+            next_tool = self._TOOL_CYCLE[idx]
+            self.editor.set_tool(next_tool)
+            self._tool_cycle_idx = idx + 1
+            if self.on_tool_cycle:
+                self.on_tool_cycle(next_tool)
+        elif idx == len(self._TOOL_CYCLE):
+            # Cycle index == len -> trigger plan
+            self._tool_cycle_idx = idx + 1
+            if self.on_tool_cycle:
+                self.on_tool_cycle("plan")
+        elif idx == len(self._TOOL_CYCLE) + 1:
+            # Cycle index == len+1 -> trigger execute
+            self._tool_cycle_idx = idx + 1
+            if self.on_tool_cycle:
+                self.on_tool_cycle("execute")
 
     # --- Coordinate conversion --------------------------------------------
 
@@ -389,37 +434,42 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
         root_layout = QHBoxLayout(root)
 
-        # Left panel
+        # Left panel: buttons fill vertical space
         left = QWidget()
         left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(4, 4, 4, 4)
+        left_layout.setSpacing(6)
 
+        self.line_btn = QPushButton("Line Obstacle")
         self.goal_btn = QPushButton("Set Goal")
         self.rect_btn = QPushButton("Rect Obstacle")
-        self.line_btn = QPushButton("Line Obstacle")
         self.erase_btn = QPushButton("Erase")
-        sep1 = QFrame()
-        sep1.setFrameShape(QFrame.HLine)
         self.plan_btn = QPushButton("Plan")
         self.execute_btn = QPushButton("Execute")
         self.cancel_btn = QPushButton("Cancel")
         self.clear_btn = QPushButton("Clear Obstacles")
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.HLine)
 
-        for btn in (self.goal_btn, self.rect_btn, self.line_btn, self.erase_btn):
-            left_layout.addWidget(btn)
-        left_layout.addWidget(sep1)
-        for btn in (self.plan_btn, self.execute_btn, self.cancel_btn, self.clear_btn):
-            left_layout.addWidget(btn)
-        left_layout.addWidget(sep2)
+        for btn in (self.line_btn, self.goal_btn, self.rect_btn, self.erase_btn,
+                    self.plan_btn, self.execute_btn, self.cancel_btn, self.clear_btn):
+            btn.setMinimumHeight(44)
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
+        left_layout.addWidget(self.line_btn, 1)
+        left_layout.addWidget(self.goal_btn, 1)
+        left_layout.addWidget(self.rect_btn, 1)
+        left_layout.addWidget(self.erase_btn, 1)
+        left_layout.addWidget(self.plan_btn, 1)
+        left_layout.addWidget(self.execute_btn, 1)
+        left_layout.addWidget(self.cancel_btn, 1)
+        left_layout.addWidget(self.clear_btn, 1)
+
+        # Status labels at the bottom
         self.conn_label = QLabel("Robot: waiting...")
         self.state_label = QLabel("State: idle")
         self.pose_label = QLabel("Pose: -")
         self.cmd_label = QLabel("cmd: vx=0.000 vy=0.000 wz=0.000")
         for lbl in (self.conn_label, self.state_label, self.pose_label, self.cmd_label):
             left_layout.addWidget(lbl)
-        left_layout.addStretch(1)
 
         # Center: RTSP + BEV
         self.raw_view = ImageView("RTSP")
@@ -429,15 +479,17 @@ class MainWindow(QMainWindow):
         mid.addWidget(self.raw_view)
         mid.addWidget(self.map_canvas)
 
-        # Right: log
+        # Right: log (fixed-size rolling window, no scrollbar)
         self.log_panel = QPlainTextEdit()
         self.log_panel.setReadOnly(True)
+        self.log_panel.setMaximumBlockCount(200)
+        self.log_panel.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(left)
         splitter.addWidget(mid)
         splitter.addWidget(self.log_panel)
-        splitter.setSizes([280, 1020, 360])
+        splitter.setSizes([180, 1020, 280])
         root_layout.addWidget(splitter)
 
     def _bind_signals(self) -> None:
@@ -450,6 +502,8 @@ class MainWindow(QMainWindow):
         self.execute_btn.clicked.connect(self._on_execute)
         self.cancel_btn.clicked.connect(self._on_cancel)
         self.clear_btn.clicked.connect(self._on_clear)
+
+        self.map_canvas.on_tool_cycle = self._on_canvas_tool_cycle
 
         self.bridge.logLine.connect(lambda level, text: self.log_panel.appendPlainText(f"[{level}] {text}"))
         self.bridge.rawFrame.connect(lambda frame: self.raw_view.set_frame(frame))
@@ -513,6 +567,15 @@ class MainWindow(QMainWindow):
         self.cancel_btn.setEnabled(state == "executing")
         self.clear_btn.setEnabled(editing)
 
+    def _on_canvas_tool_cycle(self, action) -> None:
+        """Handle right-click tool cycling from canvas."""
+        if action == "plan":
+            self._on_plan()
+        elif action == "execute":
+            self._on_execute()
+        elif isinstance(action, ToolMode):
+            self._log("INFO", f"tool -> {action.value}")
+
     # --- Button callbacks -------------------------------------------------
 
     def _on_plan(self) -> None:
@@ -528,8 +591,7 @@ class MainWindow(QMainWindow):
             )
             self.map_canvas.set_path(path)
             self.map_canvas.set_occupancy(self.runtime.occupancy)
-            self._log("INFO", f"planned path with {len(path)} points: {[(f'{p[0]:.2f}', f'{p[1]:.2f}') for p in path]}")
-            self._log("INFO", f"canvas path={len(self.map_canvas.current_path)} occ={self.map_canvas.occupancy is not None} size={self.map_canvas.size().width()}x{self.map_canvas.size().height()}")
+            self._log("INFO", f"planned path with {len(path)} points")
         except Exception as exc:
             self._log("ERROR", f"plan failed: {exc}")
             self._show_error("plan failed", exc)

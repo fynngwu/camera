@@ -1,15 +1,12 @@
-# AG 三端最小可运行版
+# AG 最小可运行版
 
-本目录已重构为三个独立端：
-- `ground_robot`：只接收天空端 `cmd_vel(vx, vy, wz)` 并打印
-- `sky_uav`：RTSP 服务 + TCP 枢纽 + 位姿/路径跟踪控制
+本目录包含两端：
+- `ground_robot`：接收 `cmd_vel(vx, vy, wz)` 并打印
 - `ground_station`：Qt 前端 + 图像 BEV 后端 + 规划/协议后端
 
 目标链路：
-1. 地面站规划路径并发送给天空端
-2. 天空端平滑路径、虚拟 odom 追踪、持续下发 `cmd_vel` 到地面机器人
-3. 天空端持续回传 `telemetry` 给地面站
-4. 地面站显示 RTSP/BEV 画面与 `cmd` 数值/箭头
+1. 地面站规划路径并发送给地面机器人
+2. 地面站显示 RTSP/BEV 画面与 `cmd` 数值/箭头
 
 ## 目录结构
 
@@ -19,36 +16,25 @@ ag/
 │   └── protocol.py                 # JSONL 协议编解码与校验
 ├── ground_robot/
 │   └── receiver.py                 # TCP 客户端，接收并打印 cmd_vel
-├── sky_uav/
-│   ├── rtsp_server.py              # 独立 RTSP 服务
-│   ├── tcp_connector.py            # TCP 枢纽：连接 GCS 与 robot
-│   ├── robot_simulator.py          # 只负责积分 x/y/yaw
-│   ├── path_executor.py            # Quintic 参考路径 + 简洁 cmd_vel 计算
-│   └── pose_controller.py          # 薄编排层：simulator + executor
 ├── ground_station/
 │   ├── frontend.py                 # Qt 前端（RTSP/BEV + 路径交互 + cmd 可视化）
 │   ├── bev_backend.py              # RTSP 接收 + AprilTag BEV
 │   └── planning_backend.py         # A* 规划 + TCP 协议收发
 ├── config/
 │   ├── ground_robot.json
-│   ├── sky_uav.json
 │   └── ground_station.json
 ├── scripts/
 │   ├── run_ground_robot.sh
-│   ├── run_sky_tcp.sh
-│   ├── run_sky_rtsp.sh
 │   └── run_ground_station.sh
 └── tests/
-    ├── test_protocol.py
-    ├── test_pose_controller.py
-    └── test_loopback_integration.py
+    └── test_protocol.py
 ```
 
 ## 协议（JSON Lines）
 
 全部消息为 `\n` 分隔 JSON 对象。
 
-### 1. Ground Station -> Sky UAV
+### 1. Ground Station -> Ground Robot
 - `path`
 - 字段：
   - `type`: `"path"`
@@ -56,40 +42,16 @@ ag/
   - `points`: `[[x, y], ...]`
   - `target_speed`: 目标线速度
 
-### 2. Sky UAV -> Ground Robot
+### 2. Ground Robot -> Ground Station
 - `cmd_vel`
 - 字段：
   - `type`: `"cmd_vel"`
   - `seq`: 整数序号
   - `vx`, `vy`, `wz`: 速度指令（当前 `vy` 默认 0）
 
-### 3. Sky UAV -> Ground Station
-- `telemetry`
-- 字段：
-  - `type`: `"telemetry"`
-  - `seq`: 整数序号
-  - `pose`: `{x, y, yaw}`
-  - `cmd`: `{vx, vy, wz}`
-  - `target_index`: 当前跟踪点索引
-  - `goal_reached`: 是否到达终点
-
-### 4. 可选观测消息
+### 3. 可选观测消息
 - `ack` / `event`
 - 作为最小可观测性与调试反馈
-
-## 默认端口
-
-- `sky_uav.gcs_port = 46001`
-- `sky_uav.robot_port = 47001`
-- `sky_uav.rtsp_port = 8554`
-
-## 路径执行策略（天空端）
-
-- 地面站发送 A* 折线后，天空端按固定步长生成 quintic 参考点
-- `robot_simulator` 只做 `vx/vy/wz -> x/y/yaw` 的积分
-- `path_executor` 只做“选参考点 + 输出 `vx/vy/wz`”
-- `pose_controller` 只负责周期调度和状态拼装
-- 到达终点阈值后输出零速并在 `telemetry.goal_reached=true`
 
 ## 启动方式
 
@@ -97,30 +59,8 @@ ag/
 
 ```bash
 ./scripts/run_ground_robot.sh
-./scripts/run_sky_tcp.sh
-./scripts/run_sky_rtsp.sh
 ./scripts/run_ground_station.sh
 ```
-
-建议启动顺序：
-1. `run_ground_robot.sh`
-2. `run_sky_tcp.sh`
-3. `run_sky_rtsp.sh`
-4. `run_ground_station.sh`
-
-## 近期计划：架构简化
-
-当前三端架构（ground_station -> sky_uav -> ground_robot）将简化为两端：
-
-- **天空端**：只负责相机推流（RTSP），不再参与控制逻辑
-- **地面站**：承担全部计算（视觉定位、路径规划、速度指令生成），直接向地面机器人发送 `cmd_vel`
-- **地面机器人**：接收端不变
-
-即控制链路从 `GCS -> Sky -> Robot` 简化为 `GCS -> Robot`，天空端退化为纯视频源。
-
-下一步：
-1. 重写地面站前端
-2. 测试地面站与机器人之间的直接通信
 
 ## 测试
 
@@ -131,16 +71,21 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 
 测试覆盖：
 - 协议字段校验（`path/cmd_vel/telemetry`）
-- Quintic 参考路径与跟踪基本性质
-- 虚拟 odom 与控制输出（直线/转向/到点停车）
-- 本机回环集成（地面站 -> 天空端 -> 机器人）
 
 ## Wiki 生成
 
-`tools/generate_wiki.py` 已切换为扫描：
+`tools/generate_wiki.py` 扫描：
 - `common/`
 - `ground_robot/`
-- `sky_uav/`
 - `ground_station/`
 
 并会自动创建 `ag/wiki/` 输出目录。
+
+## 已知问题
+
+- ArUco 标签检测后投影变形（非正方形），可能是标定参数或 tag_size 不匹配导致，需排查
+
+## 下一步计划
+
+1. 前端迁移到 Operator Station（独立操作端）
+2. 测试地面站与地面机器人之间的 TCP 通信（GCS -> Robot cmd_vel 链路验证）

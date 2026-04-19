@@ -65,6 +65,9 @@ class GcsServer:
                     continue
                 except OSError:
                     return
+            if not self._client_alive():
+                self._drop_client()
+                continue
             try:
                 payload = self._outbox.get(timeout=0.1)
             except queue.Empty:
@@ -72,8 +75,26 @@ class GcsServer:
             try:
                 self._client.sendall(payload)
             except OSError:
-                try:
-                    self._client.close()
-                except OSError:
-                    pass
-                self._client = None
+                self._drop_client()
+
+    def _client_alive(self) -> bool:
+        if self._client is None:
+            return False
+        try:
+            chunk = self._client.recv(1, socket.MSG_PEEK)
+        except socket.timeout:
+            return True
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
+        return chunk != b""
+
+    def _drop_client(self) -> None:
+        if self._client is None:
+            return
+        try:
+            self._client.close()
+        except OSError:
+            pass
+        self._client = None

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import socket
+import time
 import unittest
 
 from common.protocol import decode_message
@@ -27,6 +28,27 @@ class GcsServerTests(unittest.TestCase):
                     "timestamp": 1.0,
                 },
             )
+        finally:
+            server.stop()
+
+    def test_connected_becomes_false_after_client_disconnect(self) -> None:
+        server = GcsServer(host="127.0.0.1", port=0)
+        server.start()
+        try:
+            host, port = server.bound_address
+            sock = socket.create_connection((host, port), timeout=1.0)
+            try:
+                deadline = time.time() + 1.0
+                while time.time() < deadline and not server.connected:
+                    time.sleep(0.01)
+                self.assertTrue(server.connected)
+            finally:
+                sock.close()
+
+            deadline = time.time() + 1.0
+            while time.time() < deadline and server.connected:
+                time.sleep(0.01)
+            self.assertFalse(server.connected)
         finally:
             server.stop()
 

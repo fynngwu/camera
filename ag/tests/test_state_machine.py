@@ -18,11 +18,12 @@ class RuntimeStateMachineTests(unittest.TestCase):
         machine.to_executing()
         self.assertFalse(machine.editing_allowed)
 
-    def test_cancel_returns_to_idle(self) -> None:
+    def test_cancel_transitions_through_cancelled_then_idle(self) -> None:
         machine = RuntimeStateMachine()
         machine.to_planned()
         machine.to_executing()
-        self.assertEqual(machine.cancel(), "idle")
+        self.assertEqual(machine.cancel(), "cancelled")
+        self.assertEqual(machine.finish_cancel(), "idle")
 
 
 if __name__ == "__main__":

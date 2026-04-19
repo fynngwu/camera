@@ -76,66 +76,37 @@ ag/
 ## 核心架构
 
 ```text
-GCS (规划) ──path──→ RPi Bridge (odom模拟 + pure pursuit) ──cmd_vel──→ Robot (执行)
-                          │
-                          └──bridge_status(odom+cmd_vel+robot_odom)──→ GCS (可视化)
+Sky (RTSP推流) ──video──→ GCS (总指挥)
+GCS (规划+控制) ──cmd_vel──→ Robot (纯执行，无反馈)
 ```
 
-## 三个独立服务
+## 两个节点
 
-| 服务 | 运行位置 | 启动命令 |
-|------|----------|----------|
-| **Robot Receiver** | 地面机器人/NUC | `uv run python -m backend.robot_receiver.robot_receiver --config config/robot_receiver.json` |
-| **RPi Bridge** | 树莓派 | `uv run python -m backend.rpi_bridge.bridge_main --config config/rpi_bridge.json` |
-| **GCS GUI** | 地面站 | `uv run --extra gui python -m gcs_gui.main --config config/gcs_gui.json` |
+| 节点 | 运行位置 | 说明 |
+|------|----------|------|
+| **GCS GUI** | 地面站 | 总指挥：视频接收、BEV处理、A*规划、路径跟踪控制、发送cmd_vel |
+| **Robot Receiver** | 地面机器人 | 纯执行：接收cmd_vel并驱动电机，无反馈 |
 
 ## 数据流
-
-### GCS → RPi → Robot（下行控制）
-
-```text
-GCS 发送 path -> RPiBridge._process_gcs_message()
-    -> RPi 控制循环 _control_step()
-    -> _integrate_odom() + PathTracker.compute_command()
-    -> _send_cmd_to_robot()
-    -> RobotReceiver._process_message()
-    -> adapter.set_velocity()
-```
-
-### Robot → RPi → GCS（上行反馈）
-
-```text
-Robot status/event/ack -> RPiBridge._robot_reader_loop()
-    -> bridge_status / robot_message 转发到 GUI
-    -> MainWindow.on_bridge_status_received()
-```
 
 ### 视频链路
 
 ```text
-相机 -> RTSP -> RtspWorker
+Sky 相机 -> RTSP -> RtspWorker
     -> rawFrameReady -> ImageView
     -> (可选) BevProcessor.process -> bevFrameReady -> MapCanvas
 ```
 
+### GCS → Robot（控制命令）
+
+```text
+操作员点击目标 -> A*规划 -> OmniController路径跟踪
+    -> cmd_vel (vx, vy, wz) -> TCP -> RobotReceiver -> adapter.set_velocity()
+```
+
 ## 通信协议
 
-消息类型定义于 `backend/shared/protocol.py`：
-
-| 方向 | 类型 | 说明 |
-|------|------|------|
-| GCS→RPi | `path` | 路径点列表 + target_speed |
-| GCS→RPi | `request_status` | 请求桥接状态 |
-| RPi→Robot | `cmd_vel` | 控制速度 (vx, vy, wz) |
-| Robot→RPi | `ack` | 命令确认 |
-| Robot→RPi | `status` | 执行状态 |
-| Robot→RPi | `event` | 事件日志 |
-| RPi→GCS | `ack` | 命令确认 |
-| RPi→GCS | `bridge_status` | 桥接状态（含 odom/cmd/robot） |
-| RPi→GCS | `robot_message` | 机器人消息透传 |
-| RPi→GCS | `event` | 事件日志 |
-
-说明：系统不再使用控制模式与应用层 heartbeat。
+GCS 通过 TCP 直接发送 cmd_vel 给 Robot，Robot 无需反馈。
 
 ## 关键类
 
@@ -194,8 +165,7 @@ Robot status/event/ack -> RPiBridge._robot_reader_loop()
 
 ## 设计特点
 
-1. **职责收敛**：GCS 只负责规划与可视化，控制逻辑集中在 RPi。
-2. **链路简化**：移除 mode/heartbeat，减少状态机复杂度。
-3. **异步解耦**：Backend 使用 asyncio；GUI 使用线程+信号。
+1. **GCS 总指挥**：GCS 负责全部核心逻辑——视觉、规划、控制、通信，Sky 只推流，Robot 只执行。
+2. **链路简洁**：GCS → Robot 直连，无中间节点。
+3. **全向轮控制**：OmniController 输出 `vx + vy + wz` 三自由度速度指令。
 4. **安全兜底**：Robot Receiver 命令超时自动 stop。
-5. **状态可见**：GUI 通过 `bridge_status` 集中观测 odom/cmd/robot 反馈。

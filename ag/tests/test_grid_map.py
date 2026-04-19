@@ -36,21 +36,28 @@ class GridMapTests(unittest.TestCase):
             rects=[RectObstacle(0.0, 0.0, 0.2, 0.2)],
             lines=[],
         )
-        self.assertTrue(any(any(row) for row in occupancy))
+        inside = self.mapper.world_to_grid(0.1, 0.1)
+        outside = self.mapper.world_to_grid(-0.8, -0.8)
+        self.assertTrue(occupancy[inside[1]][inside[0]])
+        self.assertFalse(occupancy[outside[1]][outside[0]])
 
     def test_rect_obstacle_normalizes_reversed_corners(self) -> None:
         occupancy = self.mapper.build_occupancy(
             rects=[RectObstacle(0.2, 0.2, 0.0, 0.0)],
             lines=[],
         )
-        self.assertTrue(any(any(row) for row in occupancy))
+        inside = self.mapper.world_to_grid(0.1, 0.1)
+        self.assertTrue(occupancy[inside[1]][inside[0]])
 
     def test_line_obstacle_marks_cells(self) -> None:
         occupancy = self.mapper.build_occupancy(
             rects=[],
             lines=[LineObstacle(points=[(-0.5, -0.5), (0.5, -0.5), (0.5, 0.5)])],
         )
-        self.assertTrue(any(any(row) for row in occupancy))
+        along_line = self.mapper.world_to_grid(0.5, 0.0)
+        far_from_line = self.mapper.world_to_grid(-0.8, 0.8)
+        self.assertTrue(occupancy[along_line[1]][along_line[0]])
+        self.assertFalse(occupancy[far_from_line[1]][far_from_line[0]])
 
 
 if __name__ == "__main__":
